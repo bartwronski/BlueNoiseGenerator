@@ -207,7 +207,7 @@ inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScor
 	return expf(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
 }
 
-inline float ComputeDistanceScore(const int arr[], size_t Ndimensions, size_t N_valuesPerItem)
+inline float ComputeDistanceScore(const int arr[], size_t Ndimensions)
 {
 	float distanceSq = 0;
 	for (size_t i = 0; i < Ndimensions; ++i)
@@ -333,7 +333,7 @@ int main(int argc, char** argv)
 			distances[d] = (int)dim - distanceToCheck;
 		}
 
-		distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions, N_valuesPerItem);
+		distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions);
 	}
 
 	std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
