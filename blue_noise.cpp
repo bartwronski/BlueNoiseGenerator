@@ -339,7 +339,7 @@ int main(int argc, char** argv)
 	std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
 		std::chrono::system_clock::now().time_since_epoch());
 
-	float bestScore = 100000.0f;
+	float bestScore = FLT_MAX;
 	for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
 	{
 		// copy
