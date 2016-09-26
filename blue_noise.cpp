@@ -117,6 +117,43 @@ void PrintCodeOutput(const std::vector<float>& arr, const std::string& arrName, 
 
 std::string dimNames[4] = { "x", "y", "z", "w" };
 
+void PrintWebGLOutputRecursive(const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
+{
+	if (high - lo == 1)
+	{
+		std::cout << "return ";
+
+		if (N_valuesPerItem > 1)
+		{
+			std::cout << "vec" << N_valuesPerItem << "(";
+			for (size_t v = 0; v < N_valuesPerItem; ++v)
+			{
+				std::cout << arr[lo * N_valuesPerItem + v];
+				if (v < N_valuesPerItem - 1)
+				{
+					std::cout << ", ";
+				}
+			}
+
+			std::cout << ");";
+		}
+		else
+		{
+			std::cout << arr[lo] << ";";
+		}
+	}
+	else
+	{
+		size_t mid = (lo + high) / 2;
+
+		std::cout << "if(" << arrName << " < " << mid << ") " << std::endl << "{" << std::endl;
+		PrintWebGLOutputRecursive(arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, lo, mid);
+		std::cout << "} else {" << std::endl;
+		PrintWebGLOutputRecursive(arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, mid, high);
+		std::cout << std::endl << "}";
+	}
+};
+
 void PrintWebGLOutput(const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem)
 {
 	for (size_t i = 0; i < arr.size() / N_valuesPerItem; ++i)
@@ -155,32 +192,30 @@ void PrintWebGLOutput(const std::vector<float>& arr, const std::string& arrName,
 	}
 }
 
-inline float ComputeSimilarityScore(const std::vector<float>& arr, size_t N_valuesPerItem, size_t ind1, size_t ind2)
+inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScore, size_t N_valuesPerItem, size_t ind1, size_t ind2)
 {
-	float score = 0;
+	float valueSpaceScore = 0;
 	for (size_t i = 0; i < N_valuesPerItem; ++i)
 	{
 		float val = (arr[ind1 * N_valuesPerItem + i] - arr[ind2 * N_valuesPerItem + i]);
-		score += val * val;
+		valueSpaceScore += val * val;
 	}
-	// Orig paper formula 1.0f/sqrt(distance ^ vector_size)
-	// 1.0f/sqrt(sqrt(distanceSq) ^ vector_size)
-	// 1.0f/(distanceSq^(vector_size/4)
-	return powf(score, -(float)N_valuesPerItem / 4.0f);
+
+	valueSpaceScore = powf(valueSpaceScore, (float)N_valuesPerItem / 2.0f);
+	const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
+
+	return expf(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
 }
 
-inline float ComputeDistanceScore(const int arr[], size_t Ndimensions)
+inline float ComputeDistanceScore(const int arr[], size_t Ndimensions, size_t N_valuesPerItem)
 {
 	float distanceSq = 0;
-
 	for (size_t i = 0; i < Ndimensions; ++i)
 	{
 		distanceSq += arr[i] * arr[i];
 	}
-	// Note 1.1 - variance parameter recommended in original paper
-	return expf(-distanceSq / (2.0f * 1.1f));
+	return distanceSq;
 }
-
 
 float sign(float v) { return (v >= 0) ? 1.0f : -1.0f; }
 //note: remaps uniform input to triangular value
@@ -298,7 +333,7 @@ int main(int argc, char** argv)
 			distances[d] = (int)dim - distanceToCheck;
 		}
 
-		distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions);
+		distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions, N_valuesPerItem);
 	}
 
 	std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
@@ -354,8 +389,7 @@ int main(int argc, char** argv)
 				if (i == j)
 					continue;
 
-				float similarityScore = ComputeSimilarityScore(pattern[currentArray], N_valuesPerItem, i, j);
-				score += similarityScore * distanceWeights[elem];
+				score += ComputeFinalScore(pattern[currentArray], distanceWeights[elem], N_valuesPerItem, i, j);
 			}
 		}
 
@@ -386,25 +420,24 @@ int main(int argc, char** argv)
 	}
 
 	//PrintCodeOutput(pattern[currentArray], "finalDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
-	//PrintWebGLOutput(pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem);
+	//PrintWebGLOutputRecursive(pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem, 0, totalElements);
 
 	if (N_dimensions == 2)
 	{
 		char filename[512];
 		memset(filename, 0, 512);
-		sprintf(filename, "output_%dx%d_uni.bmp", dimensionSize, dimensionSize);
-		uint8_t *bytedata = FloatDataToBytes(pattern[currentArray], dimensionSize, N_valuesPerItem, false);
+		sprintf_s(filename, "output_%dx%d_uni.bmp", (int)dimensionSize, (int)dimensionSize);
+		uint8_t* bytedata = FloatDataToBytes(pattern[currentArray], dimensionSize, N_valuesPerItem, false);
 		stbi_write_bmp(filename, dimensionSize, dimensionSize, 3, bytedata);
 		std::cout << "wrote " << filename << std::endl;
 		delete[] bytedata;
 
 		memset(filename, 0, 512);
-		sprintf(filename, "output_%dx%d_tri.bmp", dimensionSize, dimensionSize);
+		sprintf_s(filename, "output_%dx%d_tri.bmp", (int)dimensionSize, (int)dimensionSize);
 		bytedata = FloatDataToBytes(pattern[currentArray], dimensionSize, N_valuesPerItem, true);
 		stbi_write_bmp(filename, dimensionSize, dimensionSize, 3, bytedata);
 		std::cout << "wrote " << filename << std::endl;
 		delete[] bytedata;
-
 	}
 
 	return 0;
