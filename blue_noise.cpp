@@ -305,7 +305,7 @@ int main(int argc, char** argv)
 
 	int time_start_ms = GetTickCount();
 
-	float bestScore = 100000.0f;
+	float bestScore = FLT_MAX;
 	for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
 	{
 		// copy
