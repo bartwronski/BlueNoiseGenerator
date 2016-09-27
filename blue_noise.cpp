@@ -339,7 +339,7 @@ int main(int argc, char** argv)
 	std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
 		std::chrono::system_clock::now().time_since_epoch());
 
-	float bestScore = FLT_MAX;
+	float bestScore = std::numeric_limits<float>::max();
 	for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
 	{
 		// copy
@@ -426,14 +426,14 @@ int main(int argc, char** argv)
 	{
 		char filename[512];
 		memset(filename, 0, 512);
-		sprintf_s(filename, "output_%dx%d_uni.bmp", (int)dimensionSize, (int)dimensionSize);
+		sprintf(filename, "output_%dx%d_uni.bmp", (int)dimensionSize, (int)dimensionSize);
 		uint8_t* bytedata = FloatDataToBytes(pattern[currentArray], dimensionSize, N_valuesPerItem, false);
 		stbi_write_bmp(filename, dimensionSize, dimensionSize, 3, bytedata);
 		std::cout << "wrote " << filename << std::endl;
 		delete[] bytedata;
 
 		memset(filename, 0, 512);
-		sprintf_s(filename, "output_%dx%d_tri.bmp", (int)dimensionSize, (int)dimensionSize);
+		sprintf(filename, "output_%dx%d_tri.bmp", (int)dimensionSize, (int)dimensionSize);
 		bytedata = FloatDataToBytes(pattern[currentArray], dimensionSize, N_valuesPerItem, true);
 		stbi_write_bmp(filename, dimensionSize, dimensionSize, 3, bytedata);
 		std::cout << "wrote " << filename << std::endl;
