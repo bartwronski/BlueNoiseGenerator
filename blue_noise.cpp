@@ -293,7 +293,7 @@ void UnifyHistogram(std::vector<float>& arr, size_t N_valuesPerItem)
 
 		for (size_t i = 0, n = entries.size(); i<n; ++i)
 		{
-			float t = static_cast<float>(i) / static_cast<float>(n);
+			float t = static_cast<float>(i) / static_cast<float>(n-1);
 			size_t idx = entries[i].second;
 			arr[idx * N_valuesPerItem + dim] = t;
 		}
