@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <fstream>
 #include <chrono>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -19,10 +20,20 @@ size_t IntPow(size_t base, size_t exp)
 	return ret;
 }
 
+enum EMethod
+{
+	Method_SolidAngle,
+	Method_HighPass,
+};
+
 const size_t dimensionSize = 32;
 const size_t N_dimensions = 2;
 const size_t N_valuesPerItem = 1;
 const size_t totalElements = IntPow(dimensionSize, N_dimensions);
+
+const EMethod chosenMethod = Method_SolidAngle;
+
+// Solid Angle method parameters
 const size_t distanceToCheck = 3; // original paper mentioned looking at whole array; however this is N^2 and super expensive, while exp(-4*4/2.2) ~= 0.000694216
 const size_t distanceToCheckBoth = distanceToCheck * 2 + 1; // in both directions
 
@@ -31,26 +42,48 @@ const size_t elementsToCheck = IntPow(distanceToCheckBoth, N_dimensions);
 const size_t numIterationsToFindDistribution = 256 * 1024;
 
 
-void PrintCodeOutput(const std::vector<float>& arr, const std::string& arrName, bool mathematica, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem)
+// Highpass filter parameters
+const size_t convSize				 = 3;
+const size_t convSizeTotal			 = IntPow(convSize, N_dimensions);
+
+const float convWeights1D[3]		 = { -1, 2, -1 };
+
+const float convWeights2D[3*3]		 = { -1, -2, -1, 
+									 	 -2, 12, -2, 
+									 	 -1, -2, -1 };
+
+const float convWeights3D[3 * 3 * 3] = { -1, -2, -1, 
+										 -2, -4, -2, 
+									     -1, -2, -1, 
+
+										 -2, -4, -2,
+										 -4, 56, -4,
+										 -2, -4, -2,
+
+										 -1, -2, -1,
+										 -2, -4, -2,
+										 -1, -2, -1,
+};
+
+void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr, const std::string& arrName, bool mathematica, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem)
 {
+	std::ofstream outFile;
+	outFile.open(fileName, std::ios::out | std::ios::trunc);
+
 	const size_t arrSize = arr.size();
 
-	if (mathematica)
+	if (!mathematica)
 	{
-		std::cout << arrName << " = " << std::endl;
-	}
-	else
-	{
-		std::cout << "static const float " << arrName;
+		outFile << "static const float " << arrName;
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			std::cout << "[" << dimensionSize << "]";
+			outFile << "[" << dimensionSize << "]";
 		}
 		if (N_valuesPerItem > 1)
 		{
-			std::cout << "[" << N_valuesPerItem << "]";
+			outFile << "[" << N_valuesPerItem << "]";
 		}
-		std::cout << " = " << std::endl;
+		outFile << " = " << std::endl;
 	}
 
 
@@ -62,7 +95,7 @@ void PrintCodeOutput(const std::vector<float>& arr, const std::string& arrName, 
 
 			if (dim == 0)
 			{
-				std::cout << "{";
+				outFile << "{";
 			}
 			else
 			{
@@ -72,20 +105,20 @@ void PrintCodeOutput(const std::vector<float>& arr, const std::string& arrName, 
 
 		if (N_valuesPerItem == 1)
 		{
-			std::cout << arr[i];
+			outFile << std::setprecision(8) << std::fixed << arr[i];
 		}
 		else
 		{
-			std::cout << "{";
+			outFile << "{";
 			for (size_t v = 0; v < N_valuesPerItem; ++v)
 			{
-				std::cout << arr[i * N_valuesPerItem + v];
+				outFile << std::setprecision(8) << std::fixed << arr[i * N_valuesPerItem + v];
 				if (v < N_valuesPerItem - 1)
 				{
-					std::cout << ", ";
+					outFile << ", ";
 				}
 			}
-			std::cout << "}";
+			outFile << "}";
 		}
 
 		for (size_t d = 0; d < N_dimensions; ++d)
@@ -94,14 +127,14 @@ void PrintCodeOutput(const std::vector<float>& arr, const std::string& arrName, 
 
 			if (dim == dimensionSize - 1)
 			{
-				std::cout << "}";
+				outFile << "}";
 			}
 			else
 			{
-				std::cout << ",";
+				outFile << ",";
 				if (d > 0)
 				{
-					std::cout << std::endl;
+					outFile << std::endl;
 				}
 				break;
 			}
@@ -109,87 +142,57 @@ void PrintCodeOutput(const std::vector<float>& arr, const std::string& arrName, 
 	}
 	if (!mathematica)
 	{
-		std::cout << ";";
+		outFile << ";";
 	}
 
-	std::cout << std::endl << std::endl;
+	outFile << std::endl << std::endl;
 }
 
 std::string dimNames[4] = { "x", "y", "z", "w" };
 
-void PrintWebGLOutputRecursive(const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
+void PrintWebGLOutputRecursive(std::ofstream& outFile, const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
 {
 	if (high - lo == 1)
 	{
-		std::cout << "return ";
+		outFile << "return ";
 
 		if (N_valuesPerItem > 1)
 		{
-			std::cout << "vec" << N_valuesPerItem << "(";
+			outFile << "vec" << N_valuesPerItem << "(";
 			for (size_t v = 0; v < N_valuesPerItem; ++v)
 			{
-				std::cout << arr[lo * N_valuesPerItem + v];
+				outFile << arr[lo * N_valuesPerItem + v];
 				if (v < N_valuesPerItem - 1)
 				{
-					std::cout << ", ";
+					outFile << ", ";
 				}
 			}
 
-			std::cout << ");";
+			outFile << ");";
 		}
 		else
 		{
-			std::cout << arr[lo] << ";";
+			outFile << arr[lo] << ";";
 		}
 	}
 	else
 	{
 		size_t mid = (lo + high) / 2;
 
-		std::cout << "if(" << arrName << " < " << mid << ") " << std::endl << "{" << std::endl;
-		PrintWebGLOutputRecursive(arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, lo, mid);
-		std::cout << "} else {" << std::endl;
-		PrintWebGLOutputRecursive(arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, mid, high);
-		std::cout << std::endl << "}";
+		outFile << "if(" << arrName << " < " << mid << ") " << std::endl << "{" << std::endl;
+		PrintWebGLOutputRecursive(outFile, arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, lo, mid);
+		outFile << "} else {" << std::endl;
+		PrintWebGLOutputRecursive(outFile, arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, mid, high);
+		outFile << std::endl << "}";
 	}
 };
 
-void PrintWebGLOutput(const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem)
+void PrintWebGLOutput(const std::string& fileName, const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
 {
-	for (size_t i = 0; i < arr.size() / N_valuesPerItem; ++i)
-	{
-		std::cout << "if (";
+	std::ofstream outFile;
+	outFile.open(fileName, std::ios::out | std::ios::trunc);
 
-		for (size_t d = 0; d < N_dimensions; ++d)
-		{
-			size_t dim = (i / IntPow(dimensionSize, d)) % dimensionSize;
-			std::cout << arrName << "." << dimNames[d] << " == " << std::setw(3) << dim;
-			if (d < N_dimensions - 1)
-			{
-				std::cout << " && ";
-			}
-		}
-		std::cout << ") return ";
-
-		if (N_valuesPerItem > 1)
-		{
-			std::cout << "vec" << N_valuesPerItem << "(";
-			for (size_t v = 0; v < N_valuesPerItem; ++v)
-			{
-				std::cout << std::setw(6) << arr[i * N_valuesPerItem + v];
-				if (v < N_valuesPerItem - 1)
-				{
-					std::cout << ", ";
-				}
-			}
-
-			std::cout << ");" << std::endl;
-		}
-		else
-		{
-			std::cout << arr[i] << ";" << std::endl;
-		}
-	}
+	PrintWebGLOutputRecursive(outFile, arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, lo, high);
 }
 
 inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScore, size_t N_valuesPerItem, size_t ind1, size_t ind2)
@@ -236,9 +239,9 @@ float remap_tri(float v)
 //note: splats to 24b
 uint8_t* FloatDataToBytes(const std::vector<float>& arr, size_t dimensionSize, size_t N_valuesPerItem, bool do_remap_tri)
 {
-	uint8_t* bytes = new uint8_t[3 * arr.size()];
+	uint8_t* bytes = new uint8_t[3 * arr.size() / N_valuesPerItem];
 
-	for (size_t i = 0, n = arr.size(); i<n; ++i)
+	for (size_t i = 0, n = arr.size() / N_valuesPerItem; i<n; ++i)
 	{
 		uint8_t lastChar = 0;
 		for (size_t j = 0; j < N_valuesPerItem; j++)
@@ -300,6 +303,20 @@ void UnifyHistogram(std::vector<float>& arr, size_t N_valuesPerItem)
 	}
 }
 
+inline size_t WrapDimension(size_t baseIndex, int offset, size_t dimSize)
+{
+	int posWrapped = (int)baseIndex + offset;
+	if (posWrapped < 0)
+	{
+		posWrapped += dimSize;
+	}
+	if (posWrapped > (int)(dimSize - 1))
+	{
+		posWrapped -= dimSize;
+	}
+
+	return posWrapped;
+}
 
 int main(int argc, char** argv)
 {
@@ -320,107 +337,149 @@ int main(int argc, char** argv)
 
 	UnifyHistogram(pattern[currentArray], N_valuesPerItem);
 
-	//PrintCodeOutput(pattern[currentArray], "initialDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
+	//PrintCodeOutput("initialDist.txt", pattern[currentArray], "initialDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
 
-	std::vector<float> distanceWeights(elementsToCheck);
-
-	for (size_t i = 0; i < elementsToCheck; ++i)
+	if (chosenMethod == Method_SolidAngle)
 	{
-		int distances[N_dimensions];
-		for (size_t d = 0; d < N_dimensions; ++d)
+		std::vector<float> distanceWeights(elementsToCheck);
+
+		for (size_t i = 0; i < elementsToCheck; ++i)
 		{
-			size_t dim = (i / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
-			distances[d] = (int)dim - distanceToCheck;
-		}
-
-		distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions);
-	}
-
-	std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
-		std::chrono::system_clock::now().time_since_epoch());
-
-	float bestScore = std::numeric_limits<float>::max();
-	for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
-	{
-		// copy
-		pattern[currentArray ^ 1] = pattern[currentArray];
-
-		uint32_t num_swaps = distInt(gen);
-		for (size_t i = 0; i < num_swaps; ++i)
-		{
-			size_t from = distSwap(gen);
-			size_t to = distSwap(gen);
-			while (from == to)
-				to = distSwap(gen);
-
-			for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
+			int distances[N_dimensions];
+			for (size_t d = 0; d < N_dimensions; ++d)
 			{
-				std::swap(pattern[currentArray][from * N_valuesPerItem + vecDim], pattern[currentArray][to * N_valuesPerItem + vecDim]);
+				size_t dim = (i / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
+				distances[d] = (int)dim - distanceToCheck;
 			}
+
+			distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions);
 		}
-		float score = 0.0f;
 
-		for (size_t i = 0; i < totalElements; ++i)
+		std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
+			std::chrono::system_clock::now().time_since_epoch());
+
+		float bestScore = std::numeric_limits<float>::max();
+		for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
 		{
-			for (size_t elem = 0; elem < elementsToCheck; ++elem)
-			{
-				size_t j = 0;
+			// copy
+			pattern[currentArray ^ 1] = pattern[currentArray];
 
-				for (size_t d = 0; d < N_dimensions; ++d)
+			uint32_t num_swaps = distInt(gen);
+			for (size_t i = 0; i < num_swaps; ++i)
+			{
+				size_t from = distSwap(gen);
+				size_t to = distSwap(gen);
+				while (from == to)
+					to = distSwap(gen);
+
+				for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
 				{
-					size_t sourceDim = (i / IntPow(dimensionSize, d)) % dimensionSize;
-					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
-
-					int offset = (int)offsetDim - distanceToCheck;
-
-					int finalPositionCompare = (int)(sourceDim + offset);
-					if (finalPositionCompare < 0)
-					{
-						finalPositionCompare += dimensionSize;
-					}
-					if (finalPositionCompare > dimensionSize - 1)
-					{
-						finalPositionCompare -= dimensionSize;
-					}
-
-					j += finalPositionCompare * IntPow(dimensionSize, d);
+					std::swap(pattern[currentArray][from * N_valuesPerItem + vecDim], pattern[currentArray][to * N_valuesPerItem + vecDim]);
 				}
+			}
+			float score = 0.0f;
 
-				if (i == j)
-					continue;
+			for (size_t i = 0; i < totalElements; ++i)
+			{
+				for (size_t elem = 0; elem < elementsToCheck; ++elem)
+				{
+					size_t j = 0;
 
-				score += ComputeFinalScore(pattern[currentArray], distanceWeights[elem], N_valuesPerItem, i, j);
+					for (size_t d = 0; d < N_dimensions; ++d)
+					{
+						size_t sourceDim = (i / IntPow(dimensionSize, d)) % dimensionSize;
+						size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
+
+						int offset = (int)offsetDim - distanceToCheck;
+
+						j += WrapDimension(sourceDim, offset, dimensionSize) * IntPow(dimensionSize, d);
+					}
+
+					if (i == j)
+						continue;
+
+					score += ComputeFinalScore(pattern[currentArray], distanceWeights[elem], N_valuesPerItem, i, j);
+				}
+			}
+
+			if (score < bestScore)
+			{
+				bestScore = score;
+			}
+			else
+			{
+				// swap back
+				currentArray ^= 1;
+			}
+
+
+			if (iter>0 && (iter % (numIterationsToFindDistribution / 100) == 0))
+			{
+				std::chrono::milliseconds time_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
+					std::chrono::system_clock::now().time_since_epoch());
+
+				std::chrono::milliseconds elapsed = time_ms - time_start_ms;
+
+				float pct = static_cast<float>(iter) / static_cast<float>(numIterationsToFindDistribution);
+				float est_remain = static_cast<float>(elapsed.count()) / pct * (1 - pct);
+				est_remain /= 1000.0f;
+
+				std::cout << iter << "/" << numIterationsToFindDistribution << " best score: " << bestScore << " eta: " << static_cast<int>(est_remain) << "s" << std::endl;
 			}
 		}
+	}
+	else if (chosenMethod == Method_HighPass)
+	{
+		const float* convArr = nullptr;
 
-		if (score < bestScore)
-		{
-			bestScore = score;
-		}
+		if (N_dimensions == 1)
+			convArr = convWeights1D;
+		else if (N_dimensions == 2)
+			convArr = convWeights2D;
 		else
+			convArr = convWeights3D;
+
+		for (size_t iter = 0; iter < 4; iter++)
 		{
-			// swap back
-			currentArray ^= 1;
-		}
+			// copy
+			pattern[currentArray ^ 1] = pattern[currentArray];
 
+			for (size_t i = 0; i < totalElements; ++i)
+			{
+				for (size_t vectorItem = 0; vectorItem < N_valuesPerItem; ++vectorItem)
+				{
+					float convSum = 0.0f;
+					for (size_t elem = 0; elem < convSizeTotal; ++elem)
+					{
+						size_t j = 0;
 
-		if (iter>0 && (iter % (numIterationsToFindDistribution / 100) == 0))
-		{
-			std::chrono::milliseconds time_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
-				std::chrono::system_clock::now().time_since_epoch());
+						for (size_t d = 0; d < N_dimensions; ++d)
+						{
+							size_t sourceDim = (i / IntPow(dimensionSize, d)) % dimensionSize;
+							size_t offsetDim = (elem / IntPow(convSize, d)) % convSize;
 
-			std::chrono::milliseconds elapsed = time_ms - time_start_ms;
+							int offset = (int)offsetDim - convSize / 2;
 
-			float pct = static_cast<float>(iter) / static_cast<float>(numIterationsToFindDistribution);
-			float est_remain = static_cast<float>(elapsed.count()) / pct * (1 - pct);
-			est_remain /= 1000.0f;
+							j += WrapDimension(sourceDim, offset, dimensionSize) * IntPow(dimensionSize, d);
+						}
 
-			std::cout << iter << "/" << numIterationsToFindDistribution << " best score: " << bestScore << " eta: " << static_cast<int>(est_remain) << "s" << std::endl;
+						convSum += pattern[currentArray ^ 1][j * N_valuesPerItem + vectorItem] * convArr[elem];
+					}
+
+					pattern[currentArray][i * N_valuesPerItem + vectorItem] = convSum;
+				}
+			}
+
+			UnifyHistogram(pattern[currentArray], N_valuesPerItem);
 		}
 	}
+	else
+	{
+		std::abort();
+	}
 
-	//PrintCodeOutput(pattern[currentArray], "finalDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
-	//PrintWebGLOutputRecursive(pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem, 0, totalElements);
+	//PrintCodeOutput("finalDist.txt", pattern[currentArray], "finalDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
+	//PrintWebGLOutput("webgl.txt", pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem, 0, totalElements);
 
 	if (N_dimensions == 2)
 	{
