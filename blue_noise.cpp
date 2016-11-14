@@ -20,16 +20,26 @@ size_t IntPow(size_t base, size_t exp)
 	return ret;
 }
 
+size_t ComputeElementCount(size_t dimCount, const size_t sizePerDim[])
+{
+	size_t elemCount = 1;
+	for (size_t currDim = 0; currDim < dimCount; ++currDim)
+	{
+		elemCount *= sizePerDim[currDim];
+	}
+	return elemCount;
+}
+
 enum EMethod
 {
 	Method_SolidAngle,
 	Method_HighPass,
 };
 
-const size_t dimensionSize = 32;
 const size_t N_dimensions = 2;
+const size_t dimensionSize[N_dimensions] = { 16, 8 };
 const size_t N_valuesPerItem = 1;
-const size_t totalElements = IntPow(dimensionSize, N_dimensions);
+const size_t totalElements = ComputeElementCount(N_dimensions, dimensionSize);
 
 const EMethod chosenMethod = Method_SolidAngle;
 
@@ -65,7 +75,7 @@ const float convWeights3D[3 * 3 * 3] = { -1, -2, -1,
 										 -1, -2, -1,
 };
 
-void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr, const std::string& arrName, bool mathematica, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem)
+void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr, const std::string& arrName, bool mathematica, const size_t dimensionSize[N_dimensions], size_t N_dimensions, size_t N_valuesPerItem)
 {
 	std::ofstream outFile;
 	outFile.open(fileName, std::ios::out | std::ios::trunc);
@@ -77,7 +87,7 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 		outFile << "static const float " << arrName;
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			outFile << "[" << dimensionSize << "]";
+			outFile << "[" << dimensionSize[d] << "]";
 		}
 		if (N_valuesPerItem > 1)
 		{
@@ -91,7 +101,7 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 	{
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			size_t dim = (i / IntPow(dimensionSize, d)) % dimensionSize;
+			size_t dim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
 
 			if (dim == 0)
 			{
@@ -123,9 +133,9 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			size_t dim = (i / IntPow(dimensionSize, d)) % dimensionSize;
+			size_t dim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
 
-			if (dim == dimensionSize - 1)
+			if (dim == dimensionSize[d] - 1)
 			{
 				outFile << "}";
 			}
@@ -150,7 +160,7 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 
 std::string dimNames[4] = { "x", "y", "z", "w" };
 
-void PrintWebGLOutputRecursive(std::ofstream& outFile, const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
+void PrintWebGLOutputRecursive(std::ofstream& outFile, const std::vector<float>& arr, const std::string& arrName, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
 {
 	if (high - lo == 1)
 	{
@@ -180,19 +190,56 @@ void PrintWebGLOutputRecursive(std::ofstream& outFile, const std::vector<float>&
 		size_t mid = (lo + high) / 2;
 
 		outFile << "if(" << arrName << " < " << mid << ") " << std::endl << "{" << std::endl;
-		PrintWebGLOutputRecursive(outFile, arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, lo, mid);
+		PrintWebGLOutputRecursive(outFile, arr, arrName, N_dimensions, N_valuesPerItem, lo, mid);
 		outFile << "} else {" << std::endl;
-		PrintWebGLOutputRecursive(outFile, arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, mid, high);
+		PrintWebGLOutputRecursive(outFile, arr, arrName, N_dimensions, N_valuesPerItem, mid, high);
 		outFile << std::endl << "}";
 	}
 };
 
-void PrintWebGLOutput(const std::string& fileName, const std::vector<float>& arr, const std::string& arrName, size_t dimensionSize, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
+void PrintWebGLOutput(const std::string& fileName, const std::vector<float>& arr, const std::string& arrName, size_t N_dimensions, size_t N_valuesPerItem, size_t lo, size_t high)
 {
 	std::ofstream outFile;
 	outFile.open(fileName, std::ios::out | std::ios::trunc);
 
-	PrintWebGLOutputRecursive(outFile, arr, arrName, dimensionSize, N_dimensions, N_valuesPerItem, lo, high);
+	PrintWebGLOutputRecursive(outFile, arr, arrName, N_dimensions, N_valuesPerItem, lo, high);
+}
+
+inline uint32_t FloatAsByteUNorm(float value)
+{
+	return uint32_t(255.f * value);
+}
+
+void SaveAsPPM(const std::vector<float>& arr, const std::string& fileName, const size_t dimensionSize[N_dimensions], size_t N_dimensions, size_t N_valuesPerItem)
+{
+	std::ofstream outfile(fileName);
+	assert(N_dimensions == 2);
+	outfile << "P3" << std::endl << dimensionSize[0] << " " << dimensionSize[1] << std::endl << 255 << std::endl;
+	const uint32_t pixCount = arr.size() / N_valuesPerItem;
+	for (size_t i = 0; i < pixCount; ++i)
+	{
+		switch (N_valuesPerItem)
+		{
+		case 1: // monichromatic values
+			outfile << FloatAsByteUNorm(arr[i]) << " "
+				<< FloatAsByteUNorm(arr[i]) << " "
+				<< FloatAsByteUNorm(arr[i]) << " ";
+			break;
+		case 2:
+			outfile << FloatAsByteUNorm(arr[i * 2]) << " "
+				<< FloatAsByteUNorm(arr[i * 2 + 1]) << " "
+				<< 0 << " ";
+			break;
+		case 3:
+			outfile << FloatAsByteUNorm(arr[i * 3]) << " "
+				<< FloatAsByteUNorm(arr[i * 3 + 1]) << " "
+				<< FloatAsByteUNorm(arr[i * 3 + 2]) << " ";
+			break;
+		default:
+			assert(0);
+		}
+	}
+	outfile.close();
 }
 
 inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScore, size_t N_valuesPerItem, size_t ind1, size_t ind2)
@@ -282,7 +329,7 @@ void UnifyHistogram(std::vector<float>& arr, size_t N_valuesPerItem)
 			entries[i] = std::make_pair(arr[i * N_valuesPerItem + dim], i);
 		}
 
-		std::sort(entries.begin(), entries.end(), [](const auto& a, const auto & b) -> bool
+		std::sort(entries.begin(), entries.end(), [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) -> bool
 		{
 			return a.first < b.first;
 		});
@@ -329,6 +376,8 @@ int main(int argc, char** argv)
 	}
 
 	UnifyHistogram(pattern[currentArray], N_valuesPerItem);
+
+	SaveAsPPM(pattern[0], "D:\\white_noise.ppm", dimensionSize, N_dimensions, N_valuesPerItem);
 
 	//PrintCodeOutput("initialDist.txt", pattern[currentArray], "initialDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
 
@@ -380,12 +429,12 @@ int main(int argc, char** argv)
 
 					for (size_t d = 0; d < N_dimensions; ++d)
 					{
-						size_t sourceDim = (i / IntPow(dimensionSize, d)) % dimensionSize;
+						size_t sourceDim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
 						size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
 
 						int offset = (int)offsetDim - distanceToCheck;
 
-						j += WrapDimension(sourceDim, offset, dimensionSize) * IntPow(dimensionSize, d);
+						j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
 					}
 
 					if (i == j)
@@ -448,12 +497,12 @@ int main(int argc, char** argv)
 
 						for (size_t d = 0; d < N_dimensions; ++d)
 						{
-							size_t sourceDim = (i / IntPow(dimensionSize, d)) % dimensionSize;
+							size_t sourceDim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
 							size_t offsetDim = (elem / IntPow(convSize, d)) % convSize;
 
 							int offset = (int)offsetDim - convSize / 2;
 
-							j += WrapDimension(sourceDim, offset, dimensionSize) * IntPow(dimensionSize, d);
+							j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
 						}
 
 						convSum += pattern[currentArray ^ 1][j * N_valuesPerItem + vectorItem] * convArr[elem];
@@ -474,7 +523,7 @@ int main(int argc, char** argv)
 	//PrintCodeOutput("finalDist.txt", pattern[currentArray], "finalDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
 	//PrintWebGLOutput("webgl.txt", pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem, 0, totalElements);
 
-	if (N_dimensions == 2)
+	/*if (N_dimensions == 2)
 	{
 		char filename[512];
 		memset(filename, 0, 512);
@@ -490,7 +539,9 @@ int main(int argc, char** argv)
 		stbi_write_bmp(filename, dimensionSize, dimensionSize, 3, bytedata);
 		std::cout << "wrote " << filename << std::endl;
 		delete[] bytedata;
-	}
+	}*/
+
+	SaveAsPPM(pattern[0], "D:\\blue_noise.ppm", dimensionSize, N_dimensions, N_valuesPerItem);
 
 	return 0;
 }
