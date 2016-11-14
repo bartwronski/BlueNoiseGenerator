@@ -21,6 +21,18 @@ size_t IntPow(size_t base, size_t exp)
 	return ret;
 }
 
+inline int FastModulo(int dividand, int divisor)
+{
+	if ((divisor & (divisor - 1)) == 0)
+	{
+		return dividand & (divisor - 1);
+	}
+	else
+	{
+		return dividand % divisor;
+	}
+}
+
 size_t ComputeElementCount(size_t dimCount, const size_t sizePerDim[])
 {
 	size_t elemCount = 1;
@@ -39,7 +51,7 @@ enum EMethod
 
 const bool   useIncrementalUpdate = true;
 const size_t N_dimensions = 2;
-const size_t dimensionSize[N_dimensions] = { 128, 128 };
+const size_t dimensionSize[N_dimensions] = { 64, 64 };
 const size_t N_valuesPerItem = 1;
 const size_t totalElements = ComputeElementCount(N_dimensions, dimensionSize);
 
@@ -582,7 +594,9 @@ int main(int argc, char** argv)
 				float est_remain = static_cast<float>(elapsed.count()) / pct * (1 - pct);
 				est_remain /= 1000.0f;
 
-				std::cout << iter << "/" << numIterationsToFindDistribution << " best score: " << bestScore << " eta: " << static_cast<int>(est_remain) << "s" << std::endl;
+				std::cout << iter << "/" << numIterationsToFindDistribution << " best score: " << bestScore << " eta: " << static_cast<int>(est_remain) << "s";
+				std::cout << "\t(" << (int(est_remain) / (60 * 60)) << " h " << (int(est_remain / 60) % 60) << " m " << (int(est_remain) % 60) << " s)";
+				std::cout <<  std::endl;
 			}
 		}
 	}
