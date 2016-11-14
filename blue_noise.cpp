@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <fstream>
 #include <chrono>
+#include <assert.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -36,8 +37,9 @@ enum EMethod
 	Method_HighPass,
 };
 
+const bool   useIncrementalUpdate = true;
 const size_t N_dimensions = 2;
-const size_t dimensionSize[N_dimensions] = { 16, 8 };
+const size_t dimensionSize[N_dimensions] = { 128, 128 };
 const size_t N_valuesPerItem = 1;
 const size_t totalElements = ComputeElementCount(N_dimensions, dimensionSize);
 
@@ -364,7 +366,8 @@ int main(int argc, char** argv)
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(0, 1);
 	// Note: we try to swap between 1 and 3 elements to try to jump over local minima
-	std::uniform_int_distribution<> distInt(1, 3);
+	const int maxSwapedElemCount = 3;
+	std::uniform_int_distribution<> distInt(1, maxSwapedElemCount);
 	std::uniform_int_distribution<> distSwap(0, (int)(totalElements - 1));
 
 	std::vector<float> pattern[2] = { std::vector<float>(totalElements * N_valuesPerItem), std::vector<float>(totalElements * N_valuesPerItem) };
@@ -401,59 +404,172 @@ int main(int argc, char** argv)
 			std::chrono::system_clock::now().time_since_epoch());
 
 		float bestScore = std::numeric_limits<float>::max();
-		for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
+
+		std::vector<bool>   touchedElemBits(totalElements, false);
+		std::vector<size_t> touchedElemIndex;
+
+		auto ComputeScore = [&](size_t srcElem, uint32_t currArray) -> float
 		{
-			// copy
-			pattern[currentArray ^ 1] = pattern[currentArray];
-
-			uint32_t num_swaps = distInt(gen);
-			for (size_t i = 0; i < num_swaps; ++i)
+			float score = 0.f;
+			for (size_t elem = 0; elem < elementsToCheck; ++elem)
 			{
-				size_t from = distSwap(gen);
-				size_t to = distSwap(gen);
-				while (from == to)
-					to = distSwap(gen);
+				size_t j = 0;
 
-				for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
+				for (size_t d = 0; d < N_dimensions; ++d)
 				{
-					std::swap(pattern[currentArray][from * N_valuesPerItem + vecDim], pattern[currentArray][to * N_valuesPerItem + vecDim]);
+					size_t sourceDim = (srcElem / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
+					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
+
+					int offset = (int)offsetDim - distanceToCheck;
+
+					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
+				}
+				if (srcElem == j)
+					continue;
+				score += ComputeFinalScore(pattern[currArray], distanceWeights[elem], N_valuesPerItem, srcElem, j);
+			}
+			assert(score >= 0.f);
+			return score;
+		};
+
+		auto MarkModifiedElems = [&](size_t srcElem) -> void
+		{
+			float score = 0.f;
+			for (size_t elem = 0; elem < elementsToCheck; ++elem)
+			{
+				size_t j = 0;
+
+				for (size_t d = 0; d < N_dimensions; ++d)
+				{
+					size_t sourceDim = (srcElem / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
+					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
+
+					int offset = (int)offsetDim - distanceToCheck;
+
+					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
+				}
+				if (touchedElemBits[j] == false)
+				{
+					touchedElemIndex.push_back(j);
+					touchedElemBits[j] = true;
 				}
 			}
-			float score = 0.0f;
+		};
 
+		if (useIncrementalUpdate)
+		{
+			pattern[currentArray ^ 1] = pattern[currentArray]; // both array start equal
+			bestScore = 0.f;
 			for (size_t i = 0; i < totalElements; ++i)
 			{
-				for (size_t elem = 0; elem < elementsToCheck; ++elem)
-				{
-					size_t j = 0;
-
-					for (size_t d = 0; d < N_dimensions; ++d)
-					{
-						size_t sourceDim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
-						size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
-
-						int offset = (int)offsetDim - distanceToCheck;
-
-						j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
-					}
-
-					if (i == j)
-						continue;
-
-					score += ComputeFinalScore(pattern[currentArray], distanceWeights[elem], N_valuesPerItem, i, j);
-				}
+				bestScore += ComputeScore(i, 0);
 			}
+		}
 
-			if (score < bestScore)
+		for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
+		{
+			if (useIncrementalUpdate && totalElements >= (18 * 18)) // incremental version becomes interesting when there are more than 18 x 18 elements to handle
 			{
-				bestScore = score;
+				uint32_t num_swaps = distInt(gen);
+				size_t swapedElemIndex[maxSwapedElemCount * 2];
+				for (size_t i = 0; i < num_swaps; ++i)
+				{
+					size_t from = distSwap(gen);
+					size_t to = distSwap(gen);
+					while (from == to)
+						to = distSwap(gen);
+
+					swapedElemIndex[2 * i] = from;
+					swapedElemIndex[2 * i + 1] = to;
+
+					// mark region where score must be recomputed
+					MarkModifiedElems(to);
+					MarkModifiedElems(from);
+
+					for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
+					{
+						std::swap(pattern[0][from * N_valuesPerItem + vecDim], pattern[0][to * N_valuesPerItem + vecDim]);
+					}
+				}
+
+				float scoreToRemove = 0.f;
+				for (size_t elemIndex : touchedElemIndex)
+				{
+					scoreToRemove += ComputeScore(elemIndex, 1); // remove score from previous distribution
+				}
+
+				float scoreToAdd = 0.f;
+				for (size_t elemIndex : touchedElemIndex)
+				{
+					scoreToAdd += ComputeScore(elemIndex, 0); // add score from current distribution
+					touchedElemBits[elemIndex] = false;
+				}
+
+				float deltaScore = scoreToAdd - scoreToRemove;
+				touchedElemIndex.clear();
+
+				if (deltaScore < 0.f)
+				{
+					bestScore += deltaScore;
+					// commit changes to other array
+					for (uint32_t i = 0; i < num_swaps * 2; ++i)
+					{
+						const int modifiedIndex = swapedElemIndex[i];
+						for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
+						{
+							pattern[1][modifiedIndex * N_valuesPerItem + vecDim] = pattern[0][modifiedIndex * N_valuesPerItem + vecDim];
+						}
+					}
+				}
+				else
+				{
+					// rollback changes from other array
+					for (uint32_t i = 0; i < num_swaps * 2; ++i)
+					{
+						const int modifiedIndex = swapedElemIndex[i];
+						for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
+						{
+							pattern[0][modifiedIndex * N_valuesPerItem + vecDim] = pattern[1][modifiedIndex * N_valuesPerItem + vecDim];
+						}
+					}
+				}
 			}
 			else
 			{
-				// swap back
-				currentArray ^= 1;
-			}
+				// version with global score update
+				// copy
+				pattern[currentArray ^ 1] = pattern[currentArray];
 
+				uint32_t num_swaps = distInt(gen);
+				for (size_t i = 0; i < num_swaps; ++i)
+				{
+					size_t from = distSwap(gen);
+					size_t to = distSwap(gen);
+					while (from == to)
+						to = distSwap(gen);
+
+					for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
+					{
+						std::swap(pattern[currentArray][from * N_valuesPerItem + vecDim], pattern[currentArray][to * N_valuesPerItem + vecDim]);
+					}
+				}
+				float score = 0.0f;
+
+				for (size_t i = 0; i < totalElements; ++i)
+				{
+					score += ComputeScore(i, currentArray);
+				}
+
+				if (score < bestScore)
+				{
+					bestScore = score;
+				}
+				else
+				{
+					// swap back
+					currentArray ^= 1;
+				}
+			}
 
 			if (iter>0 && (iter % (numIterationsToFindDistribution / 100) == 0))
 			{
