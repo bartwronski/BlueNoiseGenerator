@@ -321,7 +321,8 @@ inline uint32_t FloatAsByteUNorm(float value)
 void SaveAsPPM(const std::vector<float>& arr, const std::string& fileName, const size_t dimensionSize[N_dimensions], size_t N_dimensions, size_t N_valuesPerItem)
 {
 	std::ofstream outfile(fileName);
-	assert(N_dimensions == 2);
+	assert(N_dimensions >= 2);
+	N_dimensions = 2; // ignore depth
 	outfile << "P3" << std::endl << dimensionSize[0] << " " << dimensionSize[1] << std::endl << 255 << std::endl;
 	const uint32_t pixCount = arr.size() / N_valuesPerItem;
 	for (size_t i = 0; i < pixCount; ++i)
@@ -633,28 +634,35 @@ int main(int argc, char** argv)
 			}
 		}
 
-
 		bool actuallyUseIncrementalUpdate = useIncrementalUpdate;
-		switch(N_dimensions)
-		{
-			case 1:
-				// inconsequential here, no-op
-			break;
-			case 2: 
-				if (totalElements < IntPow(18, 2)) actuallyUseIncrementalUpdate = false; 
-			break;
-			case 3:
-			case 4:
-				if (totalElements < IntPow(12, N_dimensions)) actuallyUseIncrementalUpdate = false;
-			break;
-			default:
-				assert(0); // case not handled
-			break;
-		}
+		// I removed this part, because, in my experiment it is not so easy to make a choice when size of each dimensions are not equals 
+		// (this could be improved / automated  later) For example, big 3D texture with few slices. 
+		// For now the choice to use incremental version is left to the user. 
+		// As a rule of thumb : the bigger the texture, the higher odds are that the incremental version will be faster.
+		// Below are the measurement I made that indicate that incremental version is faster (for square and cubic cases)
+		// They are left as a reference.
+		#if 0		
+			switch(N_dimensions)
+			{
+				case 1:
+					// inconsequential here, no-op
+				break;
+				case 2: 
+					if (totalElements < IntPow(18, 2)) actuallyUseIncrementalUpdate = false;  // for a 18x18 texture or bigger, incremental version faster
+				break;
+				case 3:
+				case 4:
+					if (totalElements < IntPow(12, N_dimensions)) actuallyUseIncrementalUpdate = false; /// incremental version version faster for 12x12x12 (and bigger) or 12x12x12x12 (and bigger)
+				break;
+				default:
+					assert(0); // case not handled
+				break;
+			}
+		#endif
 
 		for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
 		{
-			if (actuallyUseIncrementalUpdate) // incremental version becomes interesting when there are more than 18 x 18 elements to handle
+			if (actuallyUseIncrementalUpdate)
 			{
 				uint32_t num_swaps = distInt(gen);
 				size_t swapedElemIndex[maxSwapedElemCount * 2];
