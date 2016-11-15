@@ -635,9 +635,28 @@ int main(int argc, char** argv)
 			}
 		}
 
+
+		bool actuallyUseIncrementalUpdate = useIncrementalUpdate;
+		switch(N_dimensions)
+		{
+			case 1:
+				// inconsequential here, no-op
+			break;
+			case 2: 
+				if (totalElements < IntPow(18, 2)) actuallyUseIncrementalUpdate = false; 
+			break;
+			case 3:
+			case 4:
+				if (totalElements < IntPow(12, N_dimensions)) actuallyUseIncrementalUpdate = false;
+			break;
+			default:
+				assert(0); // case not handled
+			break;
+		}
+
 		for (size_t iter = 0; iter < numIterationsToFindDistribution; ++iter)
 		{
-			if (useIncrementalUpdate && totalElements >= (18 * 18)) // incremental version becomes interesting when there are more than 18 x 18 elements to handle
+			if (actuallyUseIncrementalUpdate) // incremental version becomes interesting when there are more than 18 x 18 elements to handle
 			{
 				uint32_t num_swaps = distInt(gen);
 				size_t swapedElemIndex[maxSwapedElemCount * 2];
