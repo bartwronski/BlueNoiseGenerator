@@ -7,9 +7,28 @@
 #include <fstream>
 #include <chrono>
 #include <assert.h>
+#include <intrin.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+
+
+union SSERegister
+{
+	__m128 v;
+	float  s[4];
+};
+
+
+inline __m128 Negate(__m128 value)
+{
+	return _mm_xor_ps(value, _mm_set1_ps(-0.0));
+}
+
+inline __m128 Mad(__m128 v0, __m128 v1, __m128 v2)
+{
+	return _mm_add_ps(_mm_mul_ps(v0, v1), v2);
+}
 
 size_t IntPow(size_t base, size_t exp)
 {
@@ -33,6 +52,80 @@ inline int FastModulo(int dividand, int divisor)
 	}
 }
 
+inline int FastDiv(int dividand, int divisor)
+{
+	if ((divisor & (divisor - 1)) == 0)
+	{
+		unsigned long fbs;
+		_BitScanReverse(&fbs, divisor);
+		return dividand >> fbs;
+	}
+	else
+	{
+		return dividand % divisor;
+	}
+}
+
+inline float FastPowSSEScalar(float value, float exponent)
+{
+	if (exponent == 0.5f)
+	{
+		return _mm_cvtss_f32(_mm_rcp_ss(_mm_rsqrt_ss(_mm_set_ss(value))));
+	}
+	else if (exponent == 1.f)
+	{
+		return value;
+	}
+	return powf(value, exponent);
+}
+
+inline __m128 FastPowSSEVector(__m128 value, float exponent)
+{
+	if (exponent == 0.5f)
+	{
+		return _mm_rcp_ps(_mm_rsqrt_ps(value));
+	}
+	else if (exponent == 1.f)
+	{
+		return value;
+	}
+	const SSERegister &sseReg = (const SSERegister &) value;
+	return _mm_set_ps(powf(sseReg.s[0], exponent), powf(sseReg.s[1], exponent), powf(sseReg.s[2], exponent), powf(sseReg.s[3], exponent));
+}
+
+// from https://codingforspeed.com/using-faster-exponential-approximation/
+inline float FastExp(double x) 
+{
+	x = x / 1024 + 1.0;
+	x *= x; 
+	x *= x; 
+	x *= x; 
+	x *= x;
+	x *= x; 
+	x *= x; 
+	x *= x; 
+	x *= x;
+	x *= x; 
+	x *= x;
+	return float(x);
+}
+
+inline __m128 FastExpSSEVector(__m128 x)
+{
+	x = Mad(x, _mm_set_ps1(1.f / 1024.f), _mm_set_ps1(1.0));
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	x = _mm_mul_ps(x, x);
+	return x;
+}
+
 size_t ComputeElementCount(size_t dimCount, const size_t sizePerDim[])
 {
 	size_t elemCount = 1;
@@ -42,6 +135,7 @@ size_t ComputeElementCount(size_t dimCount, const size_t sizePerDim[])
 	}
 	return elemCount;
 }
+
 
 enum EMethod
 {
@@ -54,6 +148,7 @@ const size_t N_dimensions = 2;
 const size_t dimensionSize[N_dimensions] = { 64, 64 };
 const size_t N_valuesPerItem = 1;
 const size_t totalElements = ComputeElementCount(N_dimensions, dimensionSize);
+size_t dimensionElementCount[N_dimensions + 1] = { 0 };
 
 const EMethod chosenMethod = Method_SolidAngle;
 
@@ -115,7 +210,7 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 	{
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			size_t dim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
+			size_t dim = (i / dimensionElementCount[d]) % dimensionSize[d];
 
 			if (dim == 0)
 			{
@@ -147,7 +242,7 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			size_t dim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
+			size_t dim = (i / dimensionElementCount[d]) % dimensionSize[d];
 
 			if (dim == dimensionSize[d] - 1)
 			{
@@ -265,10 +360,29 @@ inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScor
 		valueSpaceScore += val * val;
 	}
 
-	valueSpaceScore = powf(valueSpaceScore, (float)N_valuesPerItem / 2.0f);
+	valueSpaceScore = FastPowSSEScalar(valueSpaceScore, (float)N_valuesPerItem / 2.0f);
 	const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
+	return FastExp(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
+}
 
-	return expf(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
+inline __m128 ComputeFinalScoreSSE(const std::vector<float>& arr, float distanceScore[4], size_t N_valuesPerItem, size_t ind1, size_t ind2[4])
+{
+	
+	SSERegister valueSpaceScore;
+	valueSpaceScore.v = _mm_set_ps1(0.f);
+	for (size_t i = 0; i < N_valuesPerItem; ++i)
+	{
+		float srcValue = arr[ind1 * N_valuesPerItem + i];
+		float val0 = srcValue - arr[ind2[0] * N_valuesPerItem + i];
+		float val1 = srcValue - arr[ind2[1] * N_valuesPerItem + i];
+		float val2 = srcValue - arr[ind2[2] * N_valuesPerItem + i];
+		float val3 = srcValue - arr[ind2[3] * N_valuesPerItem + i];
+		__m128 val = _mm_set_ps(val0, val1, val2, val3);
+		valueSpaceScore.v = Mad(val, val, valueSpaceScore.v);
+	}
+	valueSpaceScore.v = FastPowSSEVector(valueSpaceScore.v, (float)N_valuesPerItem / 2.0f);
+	const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
+	return FastExpSSEVector(Negate(Mad(_mm_set_ps(distanceScore[0], distanceScore[1], distanceScore[2], distanceScore[3]), _mm_set_ps1(oneOverDistanceVarianceSq), valueSpaceScore.v)));
 }
 
 inline float ComputeDistanceScore(const int arr[], size_t Ndimensions)
@@ -374,6 +488,11 @@ inline size_t WrapDimension(size_t baseIndex, int offset, size_t dimSize)
 
 int main(int argc, char** argv)
 {
+	for (uint32_t dim = 0; dim <= N_dimensions; ++dim)
+	{
+		dimensionElementCount[dim] = ComputeElementCount(dim, dimensionSize);
+	}
+
 	std::random_device rd;
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(0, 1);
@@ -429,12 +548,12 @@ int main(int argc, char** argv)
 
 				for (size_t d = 0; d < N_dimensions; ++d)
 				{
-					size_t sourceDim = (srcElem / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
-					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
+					size_t sourceDim = FastModulo(FastDiv(srcElem, dimensionElementCount[d]), dimensionSize[d]);
+					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;  // usually not pow 2, so not fast modulo
 
 					int offset = (int)offsetDim - distanceToCheck;
 
-					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
+					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
 				}
 				if (srcElem == j)
 					continue;
@@ -442,6 +561,44 @@ int main(int argc, char** argv)
 			}
 			assert(score >= 0.f);
 			return score;
+		};
+
+		auto ComputeScoreSSE = [&](size_t srcElem, uint32_t currArray) -> float
+		{
+			SSERegister score;
+			score.v = _mm_set_ps1(0.f);
+			size_t neighOffsets[4] = { 0 };
+			__declspec(align(16)) float  distWeights[4] = { 0 };
+			uint32_t vIndex = 0;
+			for (size_t elem = 0; elem < elementsToCheck; ++elem)
+			{			
+				size_t j = 0;
+				for (size_t d = 0; d < N_dimensions; ++d)
+				{
+					size_t sourceDim = FastModulo(FastDiv(srcElem, dimensionElementCount[d]), dimensionSize[d]);
+					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;  // usually not pow 2, so not fast modulo
+
+					int offset = (int)offsetDim - distanceToCheck;
+
+					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
+				}
+				if (srcElem == j)
+					continue;
+				neighOffsets[vIndex] = j;
+				distWeights[vIndex] = distanceWeights[elem];
+				++vIndex;
+				if (vIndex == 4)
+				{
+					score.v = _mm_add_ps(score.v, ComputeFinalScoreSSE(pattern[currArray], distWeights, N_valuesPerItem, srcElem, neighOffsets));
+					vIndex = 0;
+					distWeights[0] = 0.f; distWeights[1] = 0.f; distWeights[2] = 0.f; distWeights[3] = 0.f;
+				}
+			}
+			if (vIndex != 0)
+			{
+				score.v = _mm_add_ps(score.v, ComputeFinalScoreSSE(pattern[currArray], distWeights, N_valuesPerItem, srcElem, neighOffsets));
+			}			
+			return score.s[0] + score.s[1] + score.s[2] + score.s[3];
 		};
 
 		auto MarkModifiedElems = [&](size_t srcElem) -> void
@@ -453,12 +610,12 @@ int main(int argc, char** argv)
 
 				for (size_t d = 0; d < N_dimensions; ++d)
 				{
-					size_t sourceDim = (srcElem / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
-					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
+					size_t sourceDim = FastModulo(FastDiv(srcElem, dimensionElementCount[d]), dimensionSize[d]);
+					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth; // usually not pow 2, so not fast modulo
 
 					int offset = (int)offsetDim - distanceToCheck;
 
-					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
+					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
 				}
 				if (touchedElemBits[j] == false)
 				{
@@ -474,7 +631,7 @@ int main(int argc, char** argv)
 			bestScore = 0.f;
 			for (size_t i = 0; i < totalElements; ++i)
 			{
-				bestScore += ComputeScore(i, 0);
+				bestScore += ComputeScoreSSE(i, 0);
 			}
 		}
 
@@ -507,13 +664,13 @@ int main(int argc, char** argv)
 				float scoreToRemove = 0.f;
 				for (size_t elemIndex : touchedElemIndex)
 				{
-					scoreToRemove += ComputeScore(elemIndex, 1); // remove score from previous distribution
+					scoreToRemove += ComputeScoreSSE(elemIndex, 1); // remove score from previous distribution
 				}
 
 				float scoreToAdd = 0.f;
 				for (size_t elemIndex : touchedElemIndex)
 				{
-					scoreToAdd += ComputeScore(elemIndex, 0); // add score from current distribution
+					scoreToAdd += ComputeScoreSSE(elemIndex, 0); // add score from current distribution
 					touchedElemBits[elemIndex] = false;
 				}
 
@@ -569,7 +726,7 @@ int main(int argc, char** argv)
 
 				for (size_t i = 0; i < totalElements; ++i)
 				{
-					score += ComputeScore(i, currentArray);
+					score += ComputeScoreSSE(i, currentArray);
 				}
 
 				if (score < bestScore)
@@ -595,7 +752,7 @@ int main(int argc, char** argv)
 				est_remain /= 1000.0f;
 
 				std::cout << iter << "/" << numIterationsToFindDistribution << " best score: " << bestScore << " eta: " << static_cast<int>(est_remain) << "s";
-				std::cout << "\t(" << (int(est_remain) / (60 * 60)) << " h " << (int(est_remain / 60) % 60) << " m " << (int(est_remain) % 60) << " s)";
+				std::cout << "\t(" << (static_cast<int>(est_remain) / (60 * 60)) << " h " << (static_cast<int>(est_remain / 60) % 60) << " m " << (static_cast<int>(est_remain) % 60) << " s)";
 				std::cout <<  std::endl;
 			}
 		}
@@ -627,12 +784,12 @@ int main(int argc, char** argv)
 
 						for (size_t d = 0; d < N_dimensions; ++d)
 						{
-							size_t sourceDim = (i / ComputeElementCount(d, dimensionSize)) % dimensionSize[d];
+							size_t sourceDim = (i / dimensionElementCount[d]) % dimensionSize[d];
 							size_t offsetDim = (elem / IntPow(convSize, d)) % convSize;
 
 							int offset = (int)offsetDim - convSize / 2;
 
-							j += WrapDimension(sourceDim, offset, dimensionSize[d]) * ComputeElementCount(d, dimensionSize);
+							j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
 						}
 
 						convSum += pattern[currentArray ^ 1][j * N_valuesPerItem + vectorItem] * convArr[elem];
@@ -649,6 +806,12 @@ int main(int argc, char** argv)
 	{
 		std::abort();
 	}
+
+
+
+	//std::cout << "Incremental score is " << bestScore << ", ref score is" << compareScore << std::endl;*/
+
+	//std::cout << "Incremental score is " << bestScore << ", ref score is" << compareScore << std::endl;*/
 
 	//PrintCodeOutput("finalDist.txt", pattern[currentArray], "finalDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
 	//PrintWebGLOutput("webgl.txt", pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem, 0, totalElements);
