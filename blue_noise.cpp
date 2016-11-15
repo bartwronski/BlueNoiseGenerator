@@ -136,7 +136,6 @@ size_t ComputeElementCount(size_t dimCount, const size_t sizePerDim[])
 	return elemCount;
 }
 
-
 enum EMethod
 {
 	Method_SolidAngle,
@@ -367,7 +366,6 @@ inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScor
 
 inline __m128 ComputeFinalScoreSSE(const std::vector<float>& arr, float distanceScore[4], size_t N_valuesPerItem, size_t ind1, size_t ind2[4])
 {
-	
 	SSERegister valueSpaceScore;
 	valueSpaceScore.v = _mm_set_ps1(0.f);
 	for (size_t i = 0; i < N_valuesPerItem; ++i)
