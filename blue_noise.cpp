@@ -12,13 +12,11 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-
 union SSERegister
 {
 	__m128 v;
 	float  s[4];
 };
-
 
 inline __m128 Negate(__m128 value)
 {
@@ -144,7 +142,7 @@ enum EMethod
 
 const bool   useIncrementalUpdate = true;
 const size_t N_dimensions = 2;
-const size_t dimensionSize[N_dimensions] = { 64, 64 };
+const size_t dimensionSize[N_dimensions] = { 32, 32 };
 const size_t N_valuesPerItem = 1;
 const size_t totalElements = ComputeElementCount(N_dimensions, dimensionSize);
 size_t dimensionElementCount[N_dimensions + 1] = { 0 };
@@ -154,11 +152,8 @@ const EMethod chosenMethod = Method_SolidAngle;
 // Solid Angle method parameters
 const size_t distanceToCheck = 3; // original paper mentioned looking at whole array; however this is N^2 and super expensive, while exp(-4*4/2.2) ~= 0.000694216
 const size_t distanceToCheckBoth = distanceToCheck * 2 + 1; // in both directions
-
 const size_t elementsToCheck = IntPow(distanceToCheckBoth, N_dimensions);
-
 const size_t numIterationsToFindDistribution = 256 * 1024;
-
 
 // Highpass filter parameters
 const size_t convSize				 = 3;
@@ -203,7 +198,6 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 		}
 		outFile << " = " << std::endl;
 	}
-
 
 	for (size_t i = 0; i < arrSize / N_valuesPerItem; ++i)
 	{
@@ -262,7 +256,6 @@ void PrintCodeOutput(const std::string& fileName, const std::vector<float>& arr,
 	{
 		outFile << ";";
 	}
-
 	outFile << std::endl << std::endl;
 }
 
@@ -359,7 +352,6 @@ inline float ComputeFinalScore(const std::vector<float>& arr, float distanceScor
 		float val = (arr[ind1 * N_valuesPerItem + i] - arr[ind2 * N_valuesPerItem + i]);
 		valueSpaceScore += val * val;
 	}
-
 	valueSpaceScore = FastPowSSEScalar(valueSpaceScore, (float)N_valuesPerItem / 2.0f);
 	const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
 	return FastExp(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
@@ -485,13 +477,18 @@ inline size_t WrapDimension(size_t baseIndex, int offset, size_t dimSize)
 	return posWrapped;
 }
 
+struct KernelSample
+{
+	float	Weight;
+	int32_t Distances[N_dimensions];
+};
+
 int main(int argc, char** argv)
 {
 	for (uint32_t dim = 0; dim <= N_dimensions; ++dim)
 	{
 		dimensionElementCount[dim] = ComputeElementCount(dim, dimensionSize);
 	}
-
 	std::random_device rd;
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(0, 1);
@@ -507,84 +504,95 @@ int main(int argc, char** argv)
 	{
 		pattern[currentArray][i] = static_cast<float>(dist(gen));
 	}
-
 	UnifyHistogram(pattern[currentArray], N_valuesPerItem);
-
-	SaveAsPPM(pattern[0], "D:\\white_noise.ppm", dimensionSize, N_dimensions, N_valuesPerItem);
-
 	//PrintCodeOutput("initialDist.txt", pattern[currentArray], "initialDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
 
 	if (chosenMethod == Method_SolidAngle)
 	{
-		std::vector<float> distanceWeights(elementsToCheck);
-
+		std::vector<KernelSample> kernel;
 		for (size_t i = 0; i < elementsToCheck; ++i)
 		{
-			int distances[N_dimensions];
+			KernelSample ks;
+			float dist = 0.f;
 			for (size_t d = 0; d < N_dimensions; ++d)
 			{
 				size_t dim = (i / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;
-				distances[d] = (int)dim - distanceToCheck;
+				ks.Distances[d] = (int32_t)(dim - distanceToCheck);
+				dist += float(ks.Distances[d] * ks.Distances[d]);
 			}
-
-			distanceWeights[i] = ComputeDistanceScore(distances, N_dimensions);
+			ks.Weight = ComputeDistanceScore(ks.Distances, N_dimensions);
+			dist = powf(dist, 1.f / float(N_dimensions));
+			//if (dist <= float(distanceToCheck) + 0.001) // keep kernel round to lessen the number of samples
+			{
+				kernel.push_back(ks);
+			}
 		}
 
 		std::chrono::milliseconds time_start_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
-			std::chrono::system_clock::now().time_since_epoch());
+		std::chrono::system_clock::now().time_since_epoch());
 
 		float bestScore = std::numeric_limits<float>::max();
 
 		std::vector<bool>   touchedElemBits(totalElements, false);
 		std::vector<size_t> touchedElemIndex;
 
-		auto ComputeScore = [&](size_t srcElem, uint32_t currArray) -> float
+
+		auto CoordToIndex = [](const int32_t srcCoord[N_dimensions]) -> int32_t
+		{
+			int32_t index = 0;
+			for (size_t d = 0; d < N_dimensions; ++d)
+			{
+				index += dimensionElementCount[d] * srcCoord[d];
+			}
+			return index;
+		};
+
+		auto IndexToCoord = [](int32_t srcIndex, int32_t dstCoord[N_dimensions]) -> void
+		{
+			for (size_t d = 0; d < N_dimensions; ++d)
+			{
+				dstCoord[d] = FastModulo(FastDiv(srcIndex, dimensionElementCount[d]), dimensionSize[d]);
+			}
+		};
+
+		auto ComputeScore = [&](int32_t srcCoord[N_dimensions], uint32_t currArray) -> float
 		{
 			float score = 0.f;
-			for (size_t elem = 0; elem < elementsToCheck; ++elem)
+			int32_t srcElem = CoordToIndex(srcCoord);
+			for (const KernelSample &ks : kernel)
 			{
 				size_t j = 0;
-
 				for (size_t d = 0; d < N_dimensions; ++d)
 				{
-					size_t sourceDim = FastModulo(FastDiv(srcElem, dimensionElementCount[d]), dimensionSize[d]);
-					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;  // usually not pow 2, so not fast modulo
-
-					int offset = (int)offsetDim - distanceToCheck;
-
-					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
+					j += WrapDimension(srcCoord[d], ks.Distances[d], dimensionSize[d]) * dimensionElementCount[d];
 				}
 				if (srcElem == j)
 					continue;
-				score += ComputeFinalScore(pattern[currArray], distanceWeights[elem], N_valuesPerItem, srcElem, j);
+				score += ComputeFinalScore(pattern[currArray], ks.Weight, N_valuesPerItem, srcElem, j);
 			}
 			assert(score >= 0.f);
 			return score;
 		};
 
-		auto ComputeScoreSSE = [&](size_t srcElem, uint32_t currArray) -> float
+		auto ComputeScoreSSE = [&](int32_t srcCoord[N_dimensions], uint32_t currArray) -> float
 		{
+			int32_t srcElem = CoordToIndex(srcCoord);
 			SSERegister score;
 			score.v = _mm_set_ps1(0.f);
 			size_t neighOffsets[4] = { 0 };
 			__declspec(align(16)) float  distWeights[4] = { 0 };
 			uint32_t vIndex = 0;
-			for (size_t elem = 0; elem < elementsToCheck; ++elem)
+			for (const KernelSample &ks : kernel)
 			{			
 				size_t j = 0;
 				for (size_t d = 0; d < N_dimensions; ++d)
 				{
-					size_t sourceDim = FastModulo(FastDiv(srcElem, dimensionElementCount[d]), dimensionSize[d]);
-					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth;  // usually not pow 2, so not fast modulo
-
-					int offset = (int)offsetDim - distanceToCheck;
-
-					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
+					j += WrapDimension(srcCoord[d], ks.Distances[d], dimensionSize[d]) * dimensionElementCount[d];
 				}
 				if (srcElem == j)
 					continue;
 				neighOffsets[vIndex] = j;
-				distWeights[vIndex] = distanceWeights[elem];
+				distWeights[vIndex] = ks.Weight;
 				++vIndex;
 				if (vIndex == 4)
 				{
@@ -600,21 +608,15 @@ int main(int argc, char** argv)
 			return score.s[0] + score.s[1] + score.s[2] + score.s[3];
 		};
 
-		auto MarkModifiedElems = [&](size_t srcElem) -> void
+		auto MarkModifiedElems = [&](int32_t srcCoord[N_dimensions]) -> void
 		{
 			float score = 0.f;
-			for (size_t elem = 0; elem < elementsToCheck; ++elem)
+			for (const KernelSample &ks : kernel)
 			{
 				size_t j = 0;
-
 				for (size_t d = 0; d < N_dimensions; ++d)
 				{
-					size_t sourceDim = FastModulo(FastDiv(srcElem, dimensionElementCount[d]), dimensionSize[d]);
-					size_t offsetDim = (elem / IntPow(distanceToCheckBoth, d)) % distanceToCheckBoth; // usually not pow 2, so not fast modulo
-
-					int offset = (int)offsetDim - distanceToCheck;
-
-					j += WrapDimension(sourceDim, offset, dimensionSize[d]) * dimensionElementCount[d];
+					j += WrapDimension(srcCoord[d], ks.Distances[d], dimensionSize[d]) * dimensionElementCount[d];
 				}
 				if (touchedElemBits[j] == false)
 				{
@@ -630,7 +632,9 @@ int main(int argc, char** argv)
 			bestScore = 0.f;
 			for (size_t i = 0; i < totalElements; ++i)
 			{
-				bestScore += ComputeScoreSSE(i, 0);
+				int32_t srcCoord[N_dimensions];
+				IndexToCoord(i, srcCoord);
+				bestScore += ComputeScoreSSE(srcCoord, 0);
 			}
 		}
 
@@ -677,8 +681,14 @@ int main(int argc, char** argv)
 					swapedElemIndex[2 * i + 1] = to;
 
 					// mark region where score must be recomputed
-					MarkModifiedElems(to);
-					MarkModifiedElems(from);
+
+					int32_t toCoord[N_dimensions];
+					IndexToCoord(to, toCoord);
+					int32_t fromCoord[N_dimensions];
+					IndexToCoord(from, fromCoord);
+
+					MarkModifiedElems(toCoord);
+					MarkModifiedElems(fromCoord);
 
 					for (size_t vecDim = 0; vecDim < N_valuesPerItem; ++vecDim)
 					{
@@ -689,13 +699,17 @@ int main(int argc, char** argv)
 				float scoreToRemove = 0.f;
 				for (size_t elemIndex : touchedElemIndex)
 				{
-					scoreToRemove += ComputeScoreSSE(elemIndex, 1); // remove score from previous distribution
+					int32_t elemCoord[N_dimensions];
+					IndexToCoord(elemIndex, elemCoord);
+					scoreToRemove += ComputeScoreSSE(elemCoord, 1); // remove score from previous distribution
 				}
 
 				float scoreToAdd = 0.f;
 				for (size_t elemIndex : touchedElemIndex)
 				{
-					scoreToAdd += ComputeScoreSSE(elemIndex, 0); // add score from current distribution
+					int32_t elemCoord[N_dimensions];
+					IndexToCoord(elemIndex, elemCoord);
+					scoreToAdd += ComputeScoreSSE(elemCoord, 0); // add score from current distribution
 					touchedElemBits[elemIndex] = false;
 				}
 
@@ -748,10 +762,11 @@ int main(int argc, char** argv)
 					}
 				}
 				float score = 0.0f;
-
 				for (size_t i = 0; i < totalElements; ++i)
 				{
-					score += ComputeScoreSSE(i, currentArray);
+					int32_t elemCoord[N_dimensions];
+					IndexToCoord(i, elemCoord);
+					score += ComputeScoreSSE(elemCoord, currentArray);
 				}
 
 				if (score < bestScore)
@@ -767,6 +782,16 @@ int main(int argc, char** argv)
 
 			if (iter>0 && (iter % (numIterationsToFindDistribution / 100) == 0))
 			{
+				// tmp tmp
+				float globalScoreDebug = 0.f;
+				for (size_t i = 0; i < totalElements; ++i)
+				{
+					int32_t elemCoord[N_dimensions];
+					IndexToCoord(i, elemCoord);
+					globalScoreDebug += ComputeScoreSSE(elemCoord, currentArray);
+				}
+				std::cout << "Ref score : " << globalScoreDebug << std::endl;
+
 				std::chrono::milliseconds time_ms = std::chrono::duration_cast<std::chrono::milliseconds >(
 					std::chrono::system_clock::now().time_since_epoch());
 
@@ -832,16 +857,10 @@ int main(int argc, char** argv)
 		std::abort();
 	}
 
-
-
-	//std::cout << "Incremental score is " << bestScore << ", ref score is" << compareScore << std::endl;*/
-
-	//std::cout << "Incremental score is " << bestScore << ", ref score is" << compareScore << std::endl;*/
-
 	//PrintCodeOutput("finalDist.txt", pattern[currentArray], "finalDist", true, dimensionSize, N_dimensions, N_valuesPerItem);
 	//PrintWebGLOutput("webgl.txt", pattern[currentArray], "finalDist", dimensionSize, N_dimensions, N_valuesPerItem, 0, totalElements);
 
-	/*if (N_dimensions == 2)
+	if (N_dimensions == 2)
 	{
 		char filename[512];
 		memset(filename, 0, 512);
@@ -857,9 +876,7 @@ int main(int argc, char** argv)
 		stbi_write_bmp(filename, dimensionSize, dimensionSize, 3, bytedata);
 		std::cout << "wrote " << filename << std::endl;
 		delete[] bytedata;
-	}*/
-
-	SaveAsPPM(pattern[0], "D:\\blue_noise.ppm", dimensionSize, N_dimensions, N_valuesPerItem);
+	}
 
 	return 0;
 }
