@@ -17,12 +17,18 @@ struct IBlueNoiseGenProgressMonitor
 class BlueNoiseGenerator
 {
 public:
+	enum EResult
+	{
+		Result_OK,
+		Result_DimensionSmallerThanKernelSize,
+	};
 	BlueNoiseGenerator();
 	~BlueNoiseGenerator();
-	void GenerateBlueNoise(const BlueNoiseGeneratorParameters	&generationParameters,
-						   std::vector<float>					&whiteNoiseResult,
-						   std::vector<float>					&blueNoiseResult,
-						   IBlueNoiseGenProgressMonitor			*progressMonitor = nullptr);
+	EResult GenerateBlueNoise(const BlueNoiseGeneratorParameters	&generationParameters,
+								std::vector<float>					&whiteNoiseResult,
+								std::vector<float>					&blueNoiseResult,
+								IBlueNoiseGenProgressMonitor		*progressMonitor = nullptr);
+	static uint32_t GetMinTextureSize();
 private:
 	class BlueNoiseGeneratorImpl *pImpl;
 };

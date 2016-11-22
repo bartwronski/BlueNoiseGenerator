@@ -19,6 +19,7 @@ struct KernelSample
 {
 	float	Weight;
 	int32_t Distances[BlueNoiseGeneratorParameters::max_N_dimensions];
+	int32_t DeltaIndex;
 };
 
 ///////////
@@ -29,10 +30,11 @@ class BlueNoiseGeneratorImpl
 {
 public:
 	BlueNoiseGeneratorImpl();
-	void			GenerateBlueNoise(const BlueNoiseGeneratorParameters	&generationParameters,
-									  std::vector<float>					&whiteNoiseResult,
-									  std::vector<float>					&blueNoiseResult,
-									  IBlueNoiseGenProgressMonitor *progressMonitor = nullptr);
+	BlueNoiseGenerator::EResult	GenerateBlueNoise(	const BlueNoiseGeneratorParameters	&generationParameters,
+													std::vector<float>					&whiteNoiseResult,
+													std::vector<float>					&blueNoiseResult,
+													IBlueNoiseGenProgressMonitor		*progressMonitor = nullptr);
+	static uint32_t GetMinTextureSize() { return uint32_t(_DistanceToCheckBoth); }
 private:
 	// utility / coordinate functions
 	inline size_t	ComputeElementCount(size_t dimCount) const;
@@ -208,7 +210,7 @@ inline float BlueNoiseGeneratorImpl::ComputeFinalLocalScore(const std::vector<fl
 		float val = (arr[ind1 * N_valuesPerItem + i] - arr[ind2 * N_valuesPerItem + i]);
 		valueSpaceScore += val * val;
 	}
-	valueSpaceScore = FastPowScalar(valueSpaceScore, (float) N_valuesPerItem / 2.0f);
+	valueSpaceScore = FastPowScalar(valueSpaceScore, (float)N_valuesPerItem / 2.f);
 	const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
 	return FastExp(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
 }
@@ -220,6 +222,8 @@ inline float BlueNoiseGeneratorImpl::ComputeFinalLocalScore(const std::vector<fl
 		const size_t N_valuesPerItem = _GenParams.N_valuesPerItem;
 		SSERegister valueSpaceScore;
 		valueSpaceScore.v = _mm_set_ps1(0.f);
+		const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
+		__m128 mOneOverDistanceVarianceSq = _mm_set_ps1(oneOverDistanceVarianceSq);
 		for (size_t i = 0; i < N_valuesPerItem; ++i)
 		{
 			float srcValue = arr[ind1 * N_valuesPerItem + i];
@@ -230,9 +234,12 @@ inline float BlueNoiseGeneratorImpl::ComputeFinalLocalScore(const std::vector<fl
 			__m128 val = _mm_set_ps(val0, val1, val2, val3);
 			valueSpaceScore.v = Mad(val, val, valueSpaceScore.v);
 		}
-		valueSpaceScore.v = FastPowSSEVector(valueSpaceScore.v, (float)N_valuesPerItem / 2.0f);
-		const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
-		return FastExpSSEVector(Negate(Mad(_mm_set_ps(distanceScore[0], distanceScore[1], distanceScore[2], distanceScore[3]), _mm_set_ps1(oneOverDistanceVarianceSq), valueSpaceScore.v)));
+		if (_GenParams.N_valuesPerItem == 1)
+		{
+			valueSpaceScore.v = Abs(valueSpaceScore.v);
+		}
+		valueSpaceScore.v = FastPowSSEVector(valueSpaceScore.v, (float)N_valuesPerItem / 2.f);
+		return FastExpSSEVector(Negate(Mad(_mm_set_ps(distanceScore[0], distanceScore[1], distanceScore[2], distanceScore[3]), mOneOverDistanceVarianceSq, valueSpaceScore.v)));
 	}
 #endif
 
@@ -261,7 +268,7 @@ float BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], 
 		}
 		if (srcElem == j)
 			continue;
-		score += ComputeFinalLocalScore(_Pattern[_CurrentArray], ks.Weight, srcElem, j);
+		score += ComputeFinalLocalScore(_Pattern[currArray], ks.Weight, srcElem, j);
 	}
 	assert(score >= 0.f);
 	return score;
@@ -277,12 +284,35 @@ float BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], 
 		size_t neighOffsets[4] = { 0 };
 		__declspec(align(16)) float  distWeights[4] = { 0 }; // TODO : portable stuff here for alignment
 		uint32_t vIndex = 0;
+		bool needWrap = false;
+		int32_t baseOffset = 0;
+		for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
+		{
+			if (srcCoord[d] - int32_t(_DistanceToCheck) < 0)
+			{
+				needWrap = true;
+				break;
+			}
+			if (srcCoord[d] + int32_t(_DistanceToCheck) >= int32_t(_GenParams.dimensionSize[d]))
+			{
+				needWrap = true;
+				break;
+			}
+			baseOffset += srcCoord[d] * _DimensionElementCount[d];
+		}
 		for (const KernelSample &ks : _Kernel)
 		{
 			size_t j = 0;
-			for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
+			if (needWrap)
 			{
-				j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d]) * _DimensionElementCount[d];
+				for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
+				{
+					j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d]) * _DimensionElementCount[d];
+				}
+			}
+			else
+			{
+				j = baseOffset + ks.DeltaIndex;
 			}
 			if (srcElem == j)
 				continue;
@@ -397,12 +427,17 @@ void BlueNoiseGeneratorImpl::DoHighPass()
 }
 
 //===========================================================================================================================
-void BlueNoiseGeneratorImpl::GenerateBlueNoise(const BlueNoiseGeneratorParameters &generationParams,
-												std::vector<float> &whiteNoiseResult,
-												std::vector<float> &blueNoiseResult,
-												IBlueNoiseGenProgressMonitor *progressMonitor)
+BlueNoiseGenerator::EResult BlueNoiseGeneratorImpl::GenerateBlueNoise(	const BlueNoiseGeneratorParameters &generationParams,
+																		std::vector<float> &whiteNoiseResult,
+																		std::vector<float> &blueNoiseResult,
+																		IBlueNoiseGenProgressMonitor *progressMonitor)
 {
 	_GenParams = generationParams;
+	// current limitation : each dimension must be bigger than the kernel size for the wrap to work properly
+	for (uint32_t dim = 0; dim < _GenParams.N_dimensions; ++dim)
+	{
+		if (_GenParams.dimensionSize[dim] < _DistanceToCheckBoth) return BlueNoiseGenerator::Result_DimensionSmallerThanKernelSize;
+	}
 	_ProgressMonitor = progressMonitor;
 	_TotalElements = ComputeElementCount(_GenParams.N_dimensions);
 	// precompute elements per dimension for speed
@@ -436,7 +471,7 @@ void BlueNoiseGeneratorImpl::GenerateBlueNoise(const BlueNoiseGeneratorParameter
 	{
 		DoHighPass();
 		CommitResult();
-		return;
+		return BlueNoiseGenerator::Result_OK;;
 	}
 
 	// TODO : possibly better to start from high pass distribution, add this as an enum ?
@@ -473,6 +508,7 @@ void BlueNoiseGeneratorImpl::GenerateBlueNoise(const BlueNoiseGeneratorParameter
 		ComputeBlueNoise(_GenParams.numIterationsToFindDistribution);
 		CommitResult();
 	}
+	return BlueNoiseGenerator::Result_OK;
 }
 
 //===========================================================================================================================
@@ -498,15 +534,18 @@ void BlueNoiseGeneratorImpl::PrecomputeKernel()
 	{
 		KernelSample ks;
 		float dist = 0.f;
+		int32_t deltaIndex = 0;
 		for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
 		{
 			size_t dim = (i / IntPow(_DistanceToCheckBoth, d)) % _DistanceToCheckBoth;
 			ks.Distances[d] = (int32_t)(dim - _DistanceToCheck);
 			dist += float(ks.Distances[d] * ks.Distances[d]);
+			deltaIndex += ks.Distances[d] * _DimensionElementCount[d];
 		}
 		ks.Weight = ComputeDistanceScore(ks.Distances);
-		dist = sqrtf(dist);
-		//if (dist <= float(_DistanceToCheck) + 0.001) // keep _Kernel round to lessen the number of samples (but slightly worse quality)
+		ks.DeltaIndex = deltaIndex;
+		//float score = expf(-ks.Weight / (2.1f * 2.1f));
+		//if (score > 0.008f)
 		{
 			_Kernel.push_back(ks);
 		}
@@ -884,10 +923,16 @@ BlueNoiseGenerator::~BlueNoiseGenerator()
 }
 
 //===========================================================================================================================
-void BlueNoiseGenerator::GenerateBlueNoise(const BlueNoiseGeneratorParameters &generationParameters,
-											std::vector<float> &whiteNoiseResult,
-											std::vector<float> &blueNoiseResult,
-											IBlueNoiseGenProgressMonitor *progressMonitor)
+BlueNoiseGenerator::EResult BlueNoiseGenerator::GenerateBlueNoise(	const BlueNoiseGeneratorParameters &generationParameters,
+																	std::vector<float> &whiteNoiseResult,
+																	std::vector<float> &blueNoiseResult,
+																	IBlueNoiseGenProgressMonitor *progressMonitor)
 {
-	pImpl->GenerateBlueNoise(generationParameters, whiteNoiseResult, blueNoiseResult, progressMonitor);
+	return pImpl->GenerateBlueNoise(generationParameters, whiteNoiseResult, blueNoiseResult, progressMonitor);
+}
+
+//===========================================================================================================================
+uint32_t BlueNoiseGenerator::GetMinTextureSize()
+{
+	return BlueNoiseGeneratorImpl::GetMinTextureSize();
 }

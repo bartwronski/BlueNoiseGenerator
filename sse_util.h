@@ -19,6 +19,7 @@
 	inline __m128 Mad(__m128 v0, __m128 v1, __m128 v2);
 	inline __m128 FastPowSSEVector(__m128 value, float exponent);
 	inline __m128 FastExpSSEVector(__m128 x);
+	inline __m128 Abs(__m128 x);
 
 #endif // USE_SSE
 
