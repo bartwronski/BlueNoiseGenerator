@@ -13,8 +13,11 @@
 #include "sse_util.h"
 
 
-// private implementation for blue noise generator pImpl
+#include <iostream>
+#include <sstream>
+#include <fstream>
 
+// private implementation for blue noise generator pImpl
 struct KernelSample
 {
 	float	Weight;
@@ -35,19 +38,25 @@ public:
 													std::vector<float>					&blueNoiseResult,
 													IBlueNoiseGenProgressMonitor		*progressMonitor = nullptr);
 	static uint32_t GetMinTextureSize() { return uint32_t(_DistanceToCheckBoth); }
+	//
+	void GetCurrentBlueNoise(std::vector<float> &dest) const
+	{
+		dest = _Pattern[0];
+	}
+
 private:
 	// utility / coordinate functions
 	inline size_t	ComputeElementCount(size_t dimCount) const;
-	inline size_t	WrapDimension(size_t baseIndex, int offset, size_t dimSize) const;
+	inline int32_t	WrapDimension(size_t baseIndex, int32_t offset, size_t dimSize, size_t d) const;
 	inline int32_t	CoordToIndex(const int32_t srcCoord[]) const;
 	inline void		IndexToCoord(int32_t srcIndex, int32_t dstCoord[]) const;
 
 	// blue noise heuristic functions
 	inline float	ComputeDistanceScore(const int arr[]) const;
-	inline float	ComputeFinalLocalScore(const std::vector<float>& arr, float distanceScore, size_t ind1, size_t ind2) const;
-	float			ComputeLocalScore(const int32_t srcCoord[], uint32_t currArray) const;
-	float			ComputeLocalScoreScalar(const int32_t srcCoord[], uint32_t currArray) const;
-	float			ComputeGlobalScore(uint32_t currArray) const;
+	inline Real		ComputeFinalLocalScore(const std::vector<float>& arr, float distanceScore, size_t ind1, size_t ind2) const;
+	Real			ComputeLocalScore(const int32_t srcCoord[], uint32_t currArray) const;
+	Real			ComputeLocalScoreScalar(const int32_t srcCoord[], uint32_t currArray) const;
+	Real			ComputeGlobalScore(uint32_t currArray) const;
 	// sse specifics
 	#ifdef USE_SSE
 		inline __m128	ComputeFinalLocalScoreSSE(const std::vector<float>& arr, float distanceScore[4], size_t ind1, size_t ind2[4]) const;
@@ -63,7 +72,11 @@ private:
 	void			ComputeBlueNoiseIncrementalMultiThreaded(size_t numIter);
 	void			UnifyHistogram(std::vector<float>& arr);
 	void			DoHighPass();
-	void			NextIter(float deltaScore);
+	void			NextIter(Real deltaScore, size_t swapAttempt);
+	BlueNoiseGenerator::EResult GenerateIndependantSlices(const BlueNoiseGeneratorParameters &generationParams,
+															std::vector<float> &whiteNoiseResult,
+															std::vector<float> &blueNoiseResult,
+															IBlueNoiseGenProgressMonitor *progressMonitor);
 
 	// multi-threading handling
 	uint64_t		ComputeMTRegionAcquisitionMask(size_t elemIndex) const;
@@ -84,8 +97,10 @@ private:
 	std::vector<KernelSample>			_Kernel;
 	size_t								_TotalElements;
 	size_t								_DimensionElementCount[max_N_dimensions];
-	float								_BestScore;
+	Real								_BestScore;
 	volatile uint32_t					_IterTotal;
+	volatile size_t						_SwapCount;
+	volatile size_t						_SwapAttempt;
 	bool								_ActuallyUseMultithreading;
 	uint32_t							_AcquiredMTRegionSizeDivisorAsRShift;
 	std::atomic<uint_least64_t>			_MTAcquiredRegions;
@@ -151,7 +166,7 @@ BlueNoiseGeneratorImpl::BlueNoiseGeneratorImpl()
 	_ActuallyUseMultithreading = false;
 	_ProgressMonitor           = nullptr;
 	std::fill(std::begin(_DimensionElementCount), std::end(_DimensionElementCount), 0u);
-	_BestScore = std::numeric_limits<float>::max();
+	_BestScore = std::numeric_limits<Real>::max();
 }
 
 //===========================================================================================================================
@@ -166,18 +181,22 @@ size_t BlueNoiseGeneratorImpl::ComputeElementCount(size_t dimCount) const
 }
 
 //===========================================================================================================================
-inline size_t BlueNoiseGeneratorImpl::WrapDimension(size_t baseIndex, int offset, size_t dimSize) const
+inline int32_t BlueNoiseGeneratorImpl::WrapDimension(size_t baseIndex, int32_t offset, size_t dimSize, size_t d) const
 {
+	if (_GenParams.refineSpecificSlice >= 0 && d == (_GenParams.N_dimensions - 1))
+	{
+		return (int32_t)baseIndex + offset;
+	}
 	int posWrapped = (int)baseIndex + offset;
 	if (posWrapped < 0)
 	{
 		posWrapped += int(dimSize);
 	}
-	if (posWrapped > (int)(dimSize - 1))
+	else if (posWrapped >(int)(dimSize - 1))
 	{
 		posWrapped -= int(dimSize);
 	}
-	return posWrapped;
+	return (int32_t) posWrapped;
 }
 
 //===========================================================================================================================
@@ -201,17 +220,17 @@ inline void BlueNoiseGeneratorImpl::IndexToCoord(int32_t srcIndex, int32_t dstCo
 }
 
 //===========================================================================================================================
-inline float BlueNoiseGeneratorImpl::ComputeFinalLocalScore(const std::vector<float>& arr, float distanceScore, size_t ind1, size_t ind2) const
+inline Real BlueNoiseGeneratorImpl::ComputeFinalLocalScore(const std::vector<float>& arr, float distanceScore, size_t ind1, size_t ind2) const
 {
 	const size_t N_valuesPerItem = _GenParams.N_valuesPerItem;
-	float valueSpaceScore = 0;
+	Real valueSpaceScore = 0;
 	for (size_t i = 0; i < N_valuesPerItem; ++i)
 	{
-		float val = (arr[ind1 * N_valuesPerItem + i] - arr[ind2 * N_valuesPerItem + i]);
+		Real val = (arr[ind1 * N_valuesPerItem + i] - arr[ind2 * N_valuesPerItem + i]);
 		valueSpaceScore += val * val;
 	}
-	valueSpaceScore = FastPowScalar(valueSpaceScore, (float)N_valuesPerItem / 2.f);
-	const float oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
+	valueSpaceScore = FastPowScalar(valueSpaceScore, (Real)N_valuesPerItem / 2.f);
+	const Real oneOverDistanceVarianceSq = 1.0f / (2.1f * 2.1f);
 	return FastExp(-valueSpaceScore - distanceScore * oneOverDistanceVarianceSq);
 }
 
@@ -234,10 +253,6 @@ inline float BlueNoiseGeneratorImpl::ComputeFinalLocalScore(const std::vector<fl
 			__m128 val = _mm_set_ps(val0, val1, val2, val3);
 			valueSpaceScore.v = Mad(val, val, valueSpaceScore.v);
 		}
-		if (_GenParams.N_valuesPerItem == 1)
-		{
-			valueSpaceScore.v = Abs(valueSpaceScore.v);
-		}
 		valueSpaceScore.v = FastPowSSEVector(valueSpaceScore.v, (float)N_valuesPerItem / 2.f);
 		return FastExpSSEVector(Negate(Mad(_mm_set_ps(distanceScore[0], distanceScore[1], distanceScore[2], distanceScore[3]), mOneOverDistanceVarianceSq, valueSpaceScore.v)));
 	}
@@ -255,19 +270,20 @@ inline float BlueNoiseGeneratorImpl::ComputeDistanceScore(const int arr[]) const
 }
 
 //===========================================================================================================================
-float BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], uint32_t currArray) const
+Real BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], uint32_t currArray) const
 {
-	float score = 0.f;
+	Real score = 0.f;
 	int32_t srcElem = CoordToIndex(srcCoord);
 	for (const KernelSample &ks : _Kernel)
 	{
-		size_t j = 0;
+		int32_t j = 0;
 		for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
 		{
-			j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d]) * _DimensionElementCount[d];
+			j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d], d) * _DimensionElementCount[d];
 		}
 		if (srcElem == j)
 			continue;
+		if (_GenParams.refineSpecificSlice >= 0 && j < 0) continue;
 		score += ComputeFinalLocalScore(_Pattern[currArray], ks.Weight, srcElem, j);
 	}
 	assert(score >= 0.f);
@@ -302,12 +318,12 @@ float BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], 
 		}
 		for (const KernelSample &ks : _Kernel)
 		{
-			size_t j = 0;
+			int32_t j = 0;
 			if (needWrap)
 			{
 				for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
 				{
-					j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d]) * _DimensionElementCount[d];
+					j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d], d) * _DimensionElementCount[d];
 				}
 			}
 			else
@@ -316,6 +332,7 @@ float BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], 
 			}
 			if (srcElem == j)
 				continue;
+			if (_GenParams.refineSpecificSlice >= 0 && j < 0) continue;
 			neighOffsets[vIndex] = j;
 			distWeights[vIndex] = ks.Weight;
 			++vIndex;
@@ -335,7 +352,7 @@ float BlueNoiseGeneratorImpl::ComputeLocalScoreScalar(const int32_t srcCoord[], 
 #endif
 
 //===========================================================================================================================
-inline float BlueNoiseGeneratorImpl::ComputeLocalScore(const int32_t srcCoord[], uint32_t currArray) const
+inline Real BlueNoiseGeneratorImpl::ComputeLocalScore(const int32_t srcCoord[], uint32_t currArray) const
 {
 	#ifdef USE_SSE
 		return ComputeLocalScoreSSE(srcCoord, currArray);
@@ -345,13 +362,17 @@ inline float BlueNoiseGeneratorImpl::ComputeLocalScore(const int32_t srcCoord[],
 }
 
 //===========================================================================================================================
-float	BlueNoiseGeneratorImpl::ComputeGlobalScore(uint32_t currArray) const
+Real	BlueNoiseGeneratorImpl::ComputeGlobalScore(uint32_t currArray) const
 {
-	float score = 0.f;
+	Real score = 0.f;
 	for (size_t i = 0; i < _TotalElements; ++i)
 	{
 		int32_t srcCoord[max_N_dimensions];
 		IndexToCoord(int32_t(i), srcCoord);
+		if (_GenParams.refineSpecificSlice >= 0 && srcCoord[_GenParams.N_dimensions - 1] > int32_t(_GenParams.refineSpecificSlice))
+		{
+			continue;
+		}
 #ifdef USE_SSE
 		score += ComputeLocalScoreSSE(srcCoord, 0);
 #else
@@ -409,13 +430,13 @@ void BlueNoiseGeneratorImpl::DoHighPass()
 				float convSum = 0.0f;
 				for (size_t elem = 0; elem < _ConvSizeTotal; ++elem)
 				{
-					size_t j = 0;
+					int32_t j = 0;
 					for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
 					{
 						size_t sourceDim = (i / _DimensionElementCount[d]) % _GenParams.dimensionSize[d];
 						size_t offsetDim = (elem / IntPow(_ConvSize, d)) % _ConvSize;
 						int offset = (int)offsetDim - _ConvSize / 2;
-						j += WrapDimension(sourceDim, offset, _GenParams.dimensionSize[d]) * _DimensionElementCount[d];
+						j += WrapDimension(sourceDim, offset, _GenParams.dimensionSize[d], d) * _DimensionElementCount[d];
 					}
 					convSum += _Pattern[_CurrentArray ^ 1][j * N_valuesPerItem + vectorItem] * _ConvArr[elem];
 				}
@@ -427,11 +448,72 @@ void BlueNoiseGeneratorImpl::DoHighPass()
 }
 
 //===========================================================================================================================
+BlueNoiseGenerator::EResult BlueNoiseGeneratorImpl::GenerateIndependantSlices(const BlueNoiseGeneratorParameters &generationParams,
+																				std::vector<float> &whiteNoiseResult,
+																				std::vector<float> &blueNoiseResult,
+																				IBlueNoiseGenProgressMonitor *progressMonitor)
+{
+	_GenParams = generationParams;
+	// generate all slices independently and append them
+	BlueNoiseGeneratorParameters sliceGenParams = generationParams;
+	sliceGenParams.N_dimensions--;
+	std::vector<float> workingWhiteNoise;
+	std::vector<float> workingBlueNoise;
+	size_t lastDimSize = generationParams.dimensionSize[generationParams.N_dimensions - 1];
+	// TODO : maybe only useful to generate first slice...
+	for (size_t sliceIndex = 0; sliceIndex < lastDimSize; ++sliceIndex)
+	{
+		std::vector<float> sliceWhiteNoise;
+		std::vector<float> sliceBlueNoise;
+		BlueNoiseGenerator sliceGen;
+		sliceGenParams.chosenMethod = sliceIndex == 0 ? BlueNoiseGeneratorParameters::Method_SolidAngle : BlueNoiseGeneratorParameters::Method_WhiteNoise;
+		//sliceGenParams.chosenMethod = BlueNoiseGeneratorParameters::Method_SolidAngle;
+		// TODO : test return code
+		sliceGen.GenerateBlueNoise(sliceGenParams, sliceWhiteNoise, sliceBlueNoise, nullptr);
+		//
+		workingWhiteNoise.insert(workingWhiteNoise.end(), sliceWhiteNoise.begin(), sliceWhiteNoise.end());
+		workingBlueNoise.insert(workingBlueNoise.end(), sliceBlueNoise.begin(), sliceBlueNoise.end());		
+		if (progressMonitor)
+		{
+			progressMonitor->OnSliceGenerated(sliceIndex, lastDimSize);
+		}
+	}
+	if (progressMonitor)
+	{
+		progressMonitor->OnStartBlueNoiseGeneration();
+	}
+	// refine pass
+	for (size_t sliceIndex = 1; sliceIndex < lastDimSize; ++sliceIndex)
+	{
+		BlueNoiseGenerator sliceRefiner;
+		sliceGenParams.chosenMethod = BlueNoiseGeneratorParameters::Method_SolidAngle;
+		sliceGenParams.N_dimensions = generationParams.N_dimensions;
+		sliceGenParams.refineSpecificSlice = sliceIndex;
+		// TODO : test return code
+		sliceRefiner.GenerateBlueNoise(sliceGenParams, workingBlueNoise, workingWhiteNoise, nullptr);
+		workingBlueNoise.swap(workingWhiteNoise);
+		_Pattern[0] = workingBlueNoise;
+		if (progressMonitor)
+		{
+			progressMonitor->OnSliceRefined(sliceIndex, lastDimSize);
+		}
+	}
+	// commit result
+	whiteNoiseResult = workingWhiteNoise;
+	blueNoiseResult = workingBlueNoise;
+	return BlueNoiseGenerator::Result_OK;
+}
+
+//===========================================================================================================================
 BlueNoiseGenerator::EResult BlueNoiseGeneratorImpl::GenerateBlueNoise(	const BlueNoiseGeneratorParameters &generationParams,
 																		std::vector<float> &whiteNoiseResult,
 																		std::vector<float> &blueNoiseResult,
 																		IBlueNoiseGenProgressMonitor *progressMonitor)
 {
+	if (generationParams.chosenMethod == BlueNoiseGeneratorParameters::Method_IndependantSlices)
+	{
+		return GenerateIndependantSlices(generationParams, whiteNoiseResult, blueNoiseResult, progressMonitor);
+	}
 	_GenParams = generationParams;
 	// current limitation : each dimension must be bigger than the kernel size for the wrap to work properly
 	for (uint32_t dim = 0; dim < _GenParams.N_dimensions; ++dim)
@@ -452,7 +534,23 @@ BlueNoiseGenerator::EResult BlueNoiseGeneratorImpl::GenerateBlueNoise(	const Blu
 
 	if (_ProgressMonitor) _ProgressMonitor->OnStartWhiteNoiseGeneration();
 
-	GenerateInitialWhiteNoise();
+	if (_GenParams.refineSpecificSlice >= 0)
+	{
+		// reuse previous
+		assert(whiteNoiseResult.size() == _TotalElements * _GenParams.N_valuesPerItem);
+		_Pattern[0] = _Pattern[1] = whiteNoiseResult;
+	}
+	else
+	{
+		GenerateInitialWhiteNoise();
+	}
+
+	if (generationParams.chosenMethod == BlueNoiseGeneratorParameters::Method_WhiteNoise)
+	{
+		blueNoiseResult = whiteNoiseResult = _Pattern[_CurrentArray];
+		return BlueNoiseGenerator::Result_OK;
+	}
+
 	std::vector<float> whiteNoiseHolder = _Pattern[_CurrentArray];
 
 	auto CommitResult = [&]() -> void
@@ -482,7 +580,7 @@ BlueNoiseGenerator::EResult BlueNoiseGeneratorImpl::GenerateBlueNoise(	const Blu
 	// solid angle method //
 	////////////////////////
 
-	assert(_GenParams.chosenMethod == BlueNoiseGeneratorParameters::Method_SolidAngle);
+	assert(_GenParams.chosenMethod == BlueNoiseGeneratorParameters::Method_SolidAngle || _GenParams.chosenMethod == BlueNoiseGeneratorParameters::Method_IndependantSlices);
 	PrecomputeKernel();
 	if (_GenParams.useIncrementalUpdate)
 	{
@@ -503,7 +601,7 @@ BlueNoiseGenerator::EResult BlueNoiseGeneratorImpl::GenerateBlueNoise(	const Blu
 	}
 	else
 	{
-		_BestScore = std::numeric_limits<float>::max();
+		_BestScore = std::numeric_limits<Real>::max();
 		if (_ProgressMonitor) _ProgressMonitor->OnStartBlueNoiseGeneration();
 		ComputeBlueNoise(_GenParams.numIterationsToFindDistribution);
 		CommitResult();
@@ -542,6 +640,13 @@ void BlueNoiseGeneratorImpl::PrecomputeKernel()
 			dist += float(ks.Distances[d] * ks.Distances[d]);
 			deltaIndex += ks.Distances[d] * _DimensionElementCount[d];
 		}
+		if (_GenParams.refineSpecificSlice >= 0)
+		{
+			if (ks.Distances[_GenParams.N_dimensions - 1] > 0)
+			{
+				continue; // refine with respect to previous slices only
+			}
+		}
 		ks.Weight = ComputeDistanceScore(ks.Distances);
 		ks.DeltaIndex = deltaIndex;
 		//float score = expf(-ks.Weight / (2.1f * 2.1f));
@@ -555,14 +660,15 @@ void BlueNoiseGeneratorImpl::PrecomputeKernel()
 //===========================================================================================================================
 void BlueNoiseGeneratorImpl::MarkModifiedElems(int32_t srcCoord[], std::vector<bool> &touchedElemBits, std::vector<size_t> &touchedElemIndex)
 {
-	float score = 0.f;
+	Real score = 0.f;
 	for (const KernelSample &ks : _Kernel)
 	{
-		size_t j = 0;
+		int32_t j = 0;
 		for (size_t d = 0; d < _GenParams.N_dimensions; ++d)
 		{
-			j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d]) * _DimensionElementCount[d];
+			j += WrapDimension(srcCoord[d], ks.Distances[d], _GenParams.dimensionSize[d], d) * _DimensionElementCount[d];
 		}
+		if (_GenParams.refineSpecificSlice >= 0 && j < 0) continue;
 		if (touchedElemBits[j] == false)
 		{
 			touchedElemIndex.push_back(j);
@@ -575,6 +681,8 @@ void BlueNoiseGeneratorImpl::MarkModifiedElems(int32_t srcCoord[], std::vector<b
 void BlueNoiseGeneratorImpl::ComputeBlueNoise(size_t numIter)
 {
 	_IterTotal = 0;
+	_SwapCount = 0;
+	_SwapAttempt = 0;
 	std::random_device rd;
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(0, 1);
@@ -597,9 +705,11 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoise(size_t numIter)
 				std::swap(_Pattern[_CurrentArray][from * _GenParams.N_valuesPerItem + vecDim], _Pattern[_CurrentArray][to * _GenParams.N_valuesPerItem + vecDim]);
 			}
 		}
-		const float score = ComputeGlobalScore(_CurrentArray);
+		const Real score = ComputeGlobalScore(_CurrentArray);
+		_SwapAttempt += size_t(num_swaps);
 		if (score < _BestScore)
 		{
+			_SwapCount += size_t(num_swaps);
 			_BestScore = score;
 		}
 		else
@@ -610,7 +720,7 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoise(size_t numIter)
 		++_IterTotal;
 		if (_ProgressMonitor)
 		{
-			_ProgressMonitor->OnProgress(_IterTotal, _BestScore);
+			_ProgressMonitor->OnProgress(_IterTotal, _BestScore, _SwapCount, _SwapAttempt);
 		}
 	}
 }
@@ -621,9 +731,11 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncrementalMultiThreaded(size_t num
 	 _MTAcquiredRegions.store(0ul);
 	 _IterGuard.store(0);
 	_IterTotal = 0;
+	_SwapCount = 0;
+	_SwapAttempt = 0;
 
 	_AcquiredMTRegionSizeDivisorAsRShift = ComputeAcquiredMTRegionSizeDivisorAsRShift();
-	size_t numThread = std::thread::hardware_concurrency();
+	size_t numThread = std::thread::hardware_concurrency() - 2;
 	numThread = std::max(size_t(1u), numThread);
 
 	std::vector<std::shared_ptr<std::thread> > threads;
@@ -642,7 +754,7 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncrementalMultiThreaded(size_t num
 			while (!finished)
 			{
 				LockIterGuard();
-				_ProgressMonitor->OnProgress(_IterTotal, _BestScore);
+				_ProgressMonitor->OnProgress(_IterTotal, _BestScore, _SwapCount, _SwapAttempt);
 				UnlockIterGuard();
 				std::this_thread::sleep_for(std::chrono::milliseconds(20)); // check once in a while
 			}
@@ -694,31 +806,47 @@ uint64_t BlueNoiseGeneratorImpl::ComputeMTRegionAcquisitionMask(size_t elemIndex
 	uint64_t claimedRegions(0u);
 	for (const KernelSample &ks : _Kernel)
 	{
-		size_t bitIndex = 0;
+		int32_t bitIndex = 0;
 		if (_GenParams.N_dimensions == 2)
 		{
-			// claim part of 8 x 8 grid
-			bitIndex = (WrapDimension(coord[0], ks.Distances[0], _GenParams.dimensionSize[0]) >> _AcquiredMTRegionSizeDivisorAsRShift) +
-				8 * (WrapDimension(coord[1], ks.Distances[1], _GenParams.dimensionSize[1]) >> _AcquiredMTRegionSizeDivisorAsRShift);
-			assert(bitIndex < 64u);
-			claimedRegions |= uint64_t(1u) << bitIndex;
+			const int32_t wrappedDim[] =
+			{
+				WrapDimension(coord[0], ks.Distances[0], _GenParams.dimensionSize[0], 0),
+				WrapDimension(coord[1], ks.Distances[1], _GenParams.dimensionSize[1], 1)
+			};
+			if (wrappedDim[1] >= 0)
+			{
+				// claim part of 8 x 8 grid
+				bitIndex = (wrappedDim[0] >> _AcquiredMTRegionSizeDivisorAsRShift) +
+							8 * (wrappedDim[1] >> _AcquiredMTRegionSizeDivisorAsRShift);
+				if (bitIndex >= 0) // may happen with incremental refine of slice
+				{
+					assert(bitIndex < 64u);
+					claimedRegions |= uint64_t(1u) << bitIndex;
+				}
+			}
 		}
 		else
 		{
 			assert(_GenParams.N_dimensions == 3);
 			// claim part of 4 x 4 x 4 grid
-			const size_t wrappedDim[] =
+			const int32_t wrappedDim[] =
 			{
-				WrapDimension(coord[0], ks.Distances[0], _GenParams.dimensionSize[0]),
-				WrapDimension(coord[1], ks.Distances[1], _GenParams.dimensionSize[1]),
-				WrapDimension(coord[2], ks.Distances[2], _GenParams.dimensionSize[2])
+				WrapDimension(coord[0], ks.Distances[0], _GenParams.dimensionSize[0], 0),
+				WrapDimension(coord[1], ks.Distances[1], _GenParams.dimensionSize[1], 1),
+				WrapDimension(coord[2], ks.Distances[2], _GenParams.dimensionSize[2], 2)
 			};
-			bitIndex = (wrappedDim[0] >> _AcquiredMTRegionSizeDivisorAsRShift) +
-						4 * (wrappedDim[1] >> _AcquiredMTRegionSizeDivisorAsRShift) +
-						16 * (wrappedDim[2] >> _AcquiredMTRegionSizeDivisorAsRShift);
-
-			assert(bitIndex < 64u);
-			claimedRegions |= uint64_t(1u) << bitIndex;
+			if (wrappedDim[2] >= 0)
+			{
+				bitIndex = (wrappedDim[0] >> _AcquiredMTRegionSizeDivisorAsRShift) +
+					4 * (wrappedDim[1] >> _AcquiredMTRegionSizeDivisorAsRShift) +
+					16 * (wrappedDim[2] >> _AcquiredMTRegionSizeDivisorAsRShift);
+				if (bitIndex >= 0) // may happen with incremental refine of slice
+				{
+					assert(bitIndex < 64u);
+					claimedRegions |= uint64_t(1u) << bitIndex;
+				}
+			}
 		}
 	}
 	return claimedRegions;
@@ -762,19 +890,19 @@ void BlueNoiseGeneratorImpl::UnlockIterGuard()
 }
 
 //===========================================================================================================================
-void BlueNoiseGeneratorImpl::NextIter(float deltaScore)
+void BlueNoiseGeneratorImpl::NextIter(Real deltaScore, uint32_t swapAttempt)
 {
 	if (_ActuallyUseMultithreading)
 	{
 		LockIterGuard();
-		_BestScore += deltaScore;
-		++_IterTotal;
-		UnlockIterGuard();
 	}
-	else
+	_BestScore += deltaScore;
+	++_IterTotal;
+	_SwapAttempt += swapAttempt;
+	_SwapCount += deltaScore < 0.f ? swapAttempt : 0;
+	if (_ActuallyUseMultithreading)
 	{
-		_BestScore += deltaScore;
-		++_IterTotal;
+		UnlockIterGuard();
 	}
 }
 
@@ -782,6 +910,8 @@ void BlueNoiseGeneratorImpl::NextIter(float deltaScore)
 void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 {
 	_IterTotal = 0;
+	_SwapCount = 0;
+	_SwapAttempt = 0;
 
 	std::vector<bool>   touchedElemBits(_TotalElements, false);
 	std::vector<size_t> touchedElemIndex;
@@ -790,7 +920,16 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 	std::mt19937 gen(rd());
 	std::uniform_real_distribution<> dist(0, 1);
 	std::uniform_int_distribution<> distInt(1, _MaxSwapedElemCount);
-	std::uniform_int_distribution<> distSwap(0, (int)(_TotalElements - 1));
+	int32_t totalElement = _TotalElements;
+	size_t indexOffset = 0;
+	if (_GenParams.refineSpecificSlice >= 0)
+	{
+		totalElement = ComputeElementCount(_GenParams.N_dimensions - 1);
+		indexOffset = ComputeElementCount(_GenParams.N_dimensions - 1) * _GenParams.refineSpecificSlice;
+	}
+	std::uniform_int_distribution<> distSwap(0, (int)(totalElement - 1));
+	//std::uniform_int_distribution<> distSwapDelta(-7, 7);
+	//std::uniform_int_distribution<> distSwapDeltaDepth(-2, 2);
 
 	for (size_t iter = 0; iter < numIter; ++iter)
 	{
@@ -806,10 +945,10 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 			// compute the swaps, possibly building a bitfield or the regions that need to be acquired (for multi-threaded version)
 			for (size_t i = 0; i < num_swaps; ++i)
 			{
-				from[i] = distSwap(gen);
-				to[i] = distSwap(gen);
+				from[i] = distSwap(gen) + indexOffset;
+				to[i] = distSwap(gen) + indexOffset;
 				while (from[i] == to[i])
-					to[i] = distSwap(gen);
+					to[i] = distSwap(gen) + indexOffset;
 				// update claimed region bitfield
 				if (_ActuallyUseMultithreading)
 				{
@@ -851,7 +990,7 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 		// compute score delta
 		// we do it in local neighbourhood only, because  elements further than 3 / 4 cell from here do not contribute significantly
 
-		float scoreToRemove = 0.f;
+		Real scoreToRemove = 0.f;
 		for (size_t elemIndex : touchedElemIndex)
 		{
 			int32_t elemCoord[max_N_dimensions];
@@ -859,7 +998,7 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 			scoreToRemove += ComputeLocalScore(elemCoord, 1);
 		}
 
-		float scoreToAdd = 0.f;
+		Real scoreToAdd = 0.f;
 		for (size_t elemIndex : touchedElemIndex)
 		{
 			int32_t elemCoord[max_N_dimensions];
@@ -868,7 +1007,7 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 			touchedElemBits[elemIndex] = false;
 		}
 
-		float deltaScore = scoreToAdd - scoreToRemove;
+		Real deltaScore = scoreToAdd - scoreToRemove;
 		touchedElemIndex.clear();
 
 		auto CopyModifications = [&](uint32_t from, uint32_t to) -> void
@@ -885,17 +1024,17 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 
 		if (deltaScore < 0.f)
 		{
-			NextIter(deltaScore);
-			// commit changes to other array
+			NextIter(deltaScore, num_swaps);
+			// this swap contributes to better swap
+			// => commit changes to other array
 			CopyModifications(0, 1);
 		}
 		else
 		{
-			NextIter(0.f);
+			NextIter(0.f, num_swaps);
 			// rollback changes from other array
 			CopyModifications(1, 0);
 		}
-
 		if (_ActuallyUseMultithreading)
 		{
 			ReleaseMTRegion(claimedRegions);
@@ -905,7 +1044,7 @@ void BlueNoiseGeneratorImpl::ComputeBlueNoiseIncremental(size_t numIter)
 		{
 			if (_ProgressMonitor)
 			{
-				_ProgressMonitor->OnProgress(_IterTotal, _BestScore);
+				_ProgressMonitor->OnProgress(_IterTotal, _BestScore, _SwapCount, _SwapAttempt);
 			}
 		}
 	}
@@ -935,4 +1074,10 @@ BlueNoiseGenerator::EResult BlueNoiseGenerator::GenerateBlueNoise(	const BlueNoi
 uint32_t BlueNoiseGenerator::GetMinTextureSize()
 {
 	return BlueNoiseGeneratorImpl::GetMinTextureSize();
+}
+
+//===========================================================================================================================
+void BlueNoiseGenerator::GetCurrentBlueNoise(std::vector<float> &dest) const
+{
+	pImpl->GetCurrentBlueNoise(dest);
 }

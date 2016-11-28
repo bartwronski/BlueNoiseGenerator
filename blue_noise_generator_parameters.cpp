@@ -12,5 +12,6 @@ BlueNoiseGeneratorParameters::BlueNoiseGeneratorParameters()
 	useMultithreading					= true;
 	useIncrementalUpdate				= true;
 	numIterationsToFindDistribution		= 256 * 1024;
+	refineSpecificSlice = -1;
 }
 

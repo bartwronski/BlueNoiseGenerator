@@ -77,11 +77,16 @@ inline float FastPowScalar(float value, float exponent)
 #endif
 }
 
+inline double	FastPowScalar(double value, double exponent)
+{
+	return pow(value, exponent);
+}
+
 // from https://codingforspeed.com/using-faster-exponential-approximation/
-inline float FastExp(double x)
+inline float FastExp(float x)
 {
 #ifdef USE_FAST_EXP
-	x = x / 1024 + 1.0;
+	x = x / 1024.f + 1.f;
 	x *= x;
 	x *= x;
 	x *= x;
@@ -94,8 +99,13 @@ inline float FastExp(double x)
 	x *= x;
 	return float(x);
 #else
-	return float(exp(x));
+	return float(expf(x));
 #endif
+}
+
+inline double FastExp(double x)
+{
+	return exp(x);
 }
 
 #endif
