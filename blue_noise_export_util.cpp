@@ -131,7 +131,7 @@ void BlueNoiseExportUtil::PrintCodeOutput (const std::string&			fileName,
 		outFile << "static const float " << arrName;
 		for (size_t d = 0; d < N_dimensions; ++d)
 		{
-			outFile << "[" << dimensionSize[d] << "]";
+			outFile << "[" << dimensionSize[N_dimensions - 1 - d] << "]";
 		}
 		if (N_valuesPerItem > 1)
 		{
@@ -155,14 +155,14 @@ void BlueNoiseExportUtil::PrintCodeOutput (const std::string&			fileName,
 		}
 		if (N_valuesPerItem == 1)
 		{
-			outFile << std::setprecision(8) << std::fixed << arr[i];
+			outFile << std::setprecision(8) << std::fixed << arr[i] << "f";
 		}
 		else
 		{
 			outFile << "{";
 			for (size_t v = 0; v < N_valuesPerItem; ++v)
 			{
-				outFile << std::setprecision(8) << std::fixed << arr[i * N_valuesPerItem + v];
+				outFile << std::setprecision(8) << std::fixed << arr[i * N_valuesPerItem + v] << "f";
 				if (v < N_valuesPerItem - 1)
 				{
 					outFile << ", ";
